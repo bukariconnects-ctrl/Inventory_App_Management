@@ -14,6 +14,7 @@ import 'features/backup/presentation/providers/backup_provider.dart';
 import 'features/inventory/presentation/providers/inventory_provider.dart';
 import 'features/reports/presentation/providers/reports_provider.dart';
 import 'features/splash/presentation/splash_screen.dart';
+import 'features/stakeholders/presentation/providers/stakeholder_provider.dart';
 import 'features/stocktake/presentation/providers/stocktake_provider.dart';
 import 'features/transactions/presentation/providers/transaction_provider.dart';
 import 'features/warehouses/presentation/providers/warehouse_provider.dart';
@@ -58,6 +59,9 @@ class RawaaWmsApp extends StatelessWidget {
         ChangeNotifierProvider<BackupProvider>(create: (_) => BackupProvider()),
         ChangeNotifierProvider<WarehouseProvider>(
           create: (_) => WarehouseProvider(),
+        ),
+        ChangeNotifierProvider<StakeholderProvider>(
+          create: (_) => StakeholderProvider(),
         ),
         ChangeNotifierProvider<InventoryProvider>(
           create: (_) => InventoryProvider(),

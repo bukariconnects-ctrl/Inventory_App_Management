@@ -1,11 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import '../../../../core/constants/app_constants.dart';
 import '../../../../core/theme/app_colors.dart';
 import '../../../../core/utils/app_formatters.dart';
 import '../../../../core/widgets/stock_status_badge.dart';
 import '../../../inventory/data/models/stock_balance_status.dart';
 import '../../../inventory/presentation/providers/inventory_provider.dart';
+import '../../../stakeholders/presentation/screens/stakeholders_screen.dart';
 import '../../../stocktake/presentation/screens/stocktake_screen.dart';
 import '../../../transactions/presentation/screens/damage_voucher_screen.dart';
 import '../../../transactions/presentation/screens/inbound_voucher_screen.dart';
@@ -133,6 +135,17 @@ class DashboardView extends StatelessWidget {
           const _QuickActions(),
           const SizedBox(height: 12),
           const _SecondaryActions(),
+          const SizedBox(height: 12),
+          _SectionLink(
+            title: 'دليل المناديب والموردين',
+            subtitle: 'هواتف المناديب • سائقو المصنع • اتصال وواتساب',
+            icon: Icons.contacts_rounded,
+            onTap: () => Navigator.of(context).push(
+              MaterialPageRoute<void>(
+                builder: (BuildContext context) => const StakeholdersScreen(),
+              ),
+            ),
+          ),
           const SizedBox(height: 12),
           _SectionLink(
             title: 'سجل الحركات والتقارير',
@@ -321,7 +334,9 @@ class _TotalCartonsCard extends StatelessWidget {
           ),
           const SizedBox(height: 8),
           Text(
-            'موزعة على $activeWarehouses مخزن نشط',
+            'موزعة على $activeWarehouses مخزن نشط • '
+            '${AppFormatters.bottlesFor(totalCartons)} '
+            '(${AppConstants.bottlesPerCarton} عبوة في الكرتون)',
             style: TextStyle(
               color: Colors.white.withValues(alpha: 0.75),
               fontSize: 11.5,

@@ -2,10 +2,12 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../../../../core/constants/app_constants.dart';
+import '../../../../core/database/database_helper.dart';
 import '../../../../core/theme/app_colors.dart';
 import '../../../../core/utils/app_formatters.dart';
 import '../../../inventory/presentation/providers/inventory_provider.dart';
 import '../../../reports/presentation/providers/reports_provider.dart';
+import '../../../stakeholders/presentation/screens/stakeholders_screen.dart';
 import '../../../warehouses/presentation/providers/warehouse_provider.dart';
 import '../../data/models/backup_models.dart';
 import '../providers/backup_provider.dart';
@@ -19,14 +21,76 @@ class SettingsScreen extends StatefulWidget {
 }
 
 class _SettingsScreenState extends State<SettingsScreen> {
+  final TextEditingController _storekeeperController = TextEditingController();
+  bool _isSavingStorekeeper = false;
+
   @override
   void initState() {
     super.initState();
+    _loadStorekeeperName();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
         context.read<BackupProvider>().loadStats();
       }
     });
+  }
+
+  @override
+  void dispose() {
+    _storekeeperController.dispose();
+    super.dispose();
+  }
+
+  /// يقرأ اسم أمين المخزن من جدول الإعدادات.
+  Future<void> _loadStorekeeperName() async {
+    final String? name = await DatabaseHelper.instance.getSetting(
+      AppConstants.settingStorekeeperName,
+      defaultValue: AppConstants.defaultStorekeeperName,
+    );
+    if (!mounted) {
+      return;
+    }
+    _storekeeperController.text = name ?? AppConstants.defaultStorekeeperName;
+  }
+
+  /// يحفظ اسم أمين المخزن المسؤول في جدول الإعدادات.
+  Future<void> _saveStorekeeperName() async {
+    final String value = _storekeeperController.text.trim();
+    final ScaffoldMessengerState messenger = ScaffoldMessenger.of(context);
+    if (value.isEmpty) {
+      messenger.showSnackBar(
+        const SnackBar(
+          content: Text('اسم أمين المخزن مطلوب.'),
+          backgroundColor: AppColors.danger,
+        ),
+      );
+      return;
+    }
+    setState(() => _isSavingStorekeeper = true);
+    try {
+      await DatabaseHelper.instance.setSetting(
+        AppConstants.settingStorekeeperName,
+        value,
+      );
+      messenger.showSnackBar(
+        const SnackBar(
+          content: Text('تم حفظ اسم أمين المخزن بنجاح.'),
+          backgroundColor: AppColors.success,
+        ),
+      );
+    } catch (error) {
+      debugPrint('SettingsScreen._saveStorekeeperName: $error');
+      messenger.showSnackBar(
+        const SnackBar(
+          content: Text('تعذر حفظ الاسم. حاول مرة أخرى.'),
+          backgroundColor: AppColors.danger,
+        ),
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _isSavingStorekeeper = false);
+      }
+    }
   }
 
   /// يعيد تحميل كل المزوّدات بعد الاستعادة دون إعادة تشغيل التطبيق.
@@ -183,6 +247,86 @@ class _SettingsScreenState extends State<SettingsScreen> {
       body: ListView(
         padding: const EdgeInsets.fromLTRB(16, 16, 16, 28),
         children: <Widget>[
+          _SectionCard(
+            title: 'بيانات أمين المخزن المسؤول',
+            icon: Icons.badge_outlined,
+            color: AppColors.cyan,
+            children: <Widget>[
+              const Text(
+                'يُستخدم هذا الاسم في توثيق حركات المخزن وسندات التسليم '
+                'والتقارير المطبوعة.',
+                style: TextStyle(
+                  fontSize: 11.5,
+                  color: AppColors.textSecondary,
+                  height: 1.7,
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                key: const Key('storekeeper_name_field'),
+                controller: _storekeeperController,
+                textInputAction: TextInputAction.done,
+                decoration: const InputDecoration(
+                  labelText: 'اسم أمين المخزن',
+                  hintText: 'مثال: أحمد علي - مسؤول المخزن',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              const SizedBox(height: 12),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton.icon(
+                  key: const Key('save_storekeeper_button'),
+                  onPressed: _isSavingStorekeeper ? null : _saveStorekeeperName,
+                  icon: const Icon(Icons.save_rounded, size: 20),
+                  label: Text(
+                    _isSavingStorekeeper ? 'جارٍ الحفظ...' : 'حفظ الاسم',
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          Card(
+            child: ListTile(
+              key: const Key('open_stakeholders_button'),
+              leading: Container(
+                width: 38,
+                height: 38,
+                decoration: BoxDecoration(
+                  color: AppColors.mist,
+                  borderRadius: BorderRadius.circular(11),
+                ),
+                child: const Icon(
+                  Icons.contacts_rounded,
+                  color: AppColors.primary,
+                  size: 19,
+                ),
+              ),
+              title: const Text(
+                'دليل المناديب والموردين',
+                style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700),
+              ),
+              subtitle: const Text(
+                'هواتف المناديب وسائقي المصنع • اتصال وواتساب',
+                style: TextStyle(
+                  fontSize: 10.5,
+                  color: AppColors.textSecondary,
+                ),
+              ),
+              trailing: const Icon(
+                Icons.chevron_left_rounded,
+                size: 20,
+                color: AppColors.textSecondary,
+              ),
+              onTap: () => Navigator.of(context).push(
+                MaterialPageRoute<void>(
+                  builder: (BuildContext context) => const StakeholdersScreen(),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 14),
           _SectionCard(
             title: 'معلومات النظام',
             icon: Icons.info_outline_rounded,

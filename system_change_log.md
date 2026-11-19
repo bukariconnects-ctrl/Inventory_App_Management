@@ -1,7 +1,7 @@
 # سجل التغييرات — نظام إدارة مخازن مياه رواء
 
-> **الحالة:** ✅✅ **All 8 Phases Completed** — النظام مكتمل وظيفيًا وجاهز للاستخدام في مصنع مياه رواء
-> **المراحل السابقة:** Phase 1 (التأسيس) • Phase 2 (قاعدة البيانات) • Phase 3 (الواجهات) • Phase 4 (الاستلام والصرف) • Phase 5 (الإتلاف والجرد) • Phase 6 (محرك PDF) • Phase 7 (الأرشيف والتقارير) • Phase 8 (النسخ الاحتياطي والإعدادات)
+> **الحالة:** ✅✅ **Phase 9 Completed** — المراحل 1–9 مكتملة والنظام جاهز للاستخدام في مصنع مياه رواء
+> **المراحل السابقة:** Phase 1 (التأسيس) • Phase 2 (قاعدة البيانات) • Phase 3 (الواجهات) • Phase 4 (الاستلام والصرف) • Phase 5 (الإتلاف والجرد) • Phase 6 (محرك PDF) • Phase 7 (الأرشيف والتقارير) • Phase 8 (النسخ الاحتياطي والإعدادات) • Phase 9 (دليل جهات التعامل والإعدادات والوحدات المزدوجة)
 > **تاريخ التوثيق:** 13 نوفمبر 2026
 > **البيئة:** Flutter 3.32.0 • Dart 3.8.0 • sqflite 2.4.2 • sqflite_common_ffi 2.3.6 (سطح المكتب) • provider 6.1.5+1 • pdf 3.11.3 • printing 5.14.3
 
@@ -550,3 +550,94 @@ you must call databaseFactory = databaseFactoryFfi;
 **لم يُنفَّذ:** `flutter build windows` متوقف على إعداد الجهاز:
 «Building with plugins requires symlink support — enable Developer Mode» (إعداد نظام يتطلب إذن المستخدم).
 المحاولة على Windows تحتاج تفعيل وضع المطوّر ثم `flutter run -d windows`.
+
+---
+
+# المرحلة 9 — دليل جهات التعامل، ملف أمين المخزن، والوحدات المزدوجة
+
+## 23. ترقية مخطط قاعدة البيانات (الإصدار 2)
+
+| العنصر | التفصيل |
+|---|---|
+| `stakeholders` | `id` • `name` (إلزامي) • `phone` • `type` (`DISTRIBUTOR`/`DRIVER`) • `vehicle_number` • `is_active` • `created_at`، مع فهرس على `type`. |
+| `app_settings` | `key` (مفتاح أساسي) • `value`، ويُبذر فيه `storekeeper_name = أمين المخزن`. |
+| الترقية | `AppConstants.databaseVersion = 2` مع `onUpgrade`: أي قاعدة قديمة تُنشأ فيها الجدولان وتُبذر الإعدادات دون فقد بيانات. القواعد الجديدة تنشئهما في `onCreate` مباشرة. |
+| دوال الإعدادات | `DatabaseHelper.getSetting(key, {defaultValue})` و`setSetting(key, value)` باستخدام `ConflictAlgorithm.replace`. |
+
+## 24. النماذج والمستودع والمزوّد
+
+- `StakeholderType` (enum): `distributor` = «مندوب / موزّع»، `driver` = «سائق مصنع / مورّد» مع تحويل آمن من قيمة قاعدة البيانات.
+- `StakeholderModel`: `id`, `name`, `phone`, `type`, `vehicleNumber`, `isActive`, `createdAt`، مع `toMap`/`fromMap`/`copyWith` وخصائص `hasPhone` و`phoneDigits` (أرقام فقط لروابط الاتصال).
+- `StakeholderRepository`: `insertStakeholder`, `updateStakeholder`, `deleteStakeholder`, `toggleStatus`, `getById`, `getAll`, `getDistributors` (نشطون فقط), `getDrivers` (نشطون فقط), `searchStakeholders(query, {type})` على الاسم/الهاتف/اللوحة.
+- `StakeholderProvider`: يحمّل القائمتين معًا، ويوفر `addStakeholder`/`updateStakeholder`/`toggleStakeholder`/`deleteStakeholder` مع تحقق من الاسم ورسائل خطأ عربية وإعادة تحميل تلقائية بعد كل تغيير، ومسجّل في `MultiProvider` بـ `main.dart`.
+
+## 25. شاشة دليل المناديب والموردين
+
+- `StakeholdersScreen` بتبويبين: **المناديب** (عددهم في العنوان) و**السائقون**، وزر إضافة عائم يفتح النوع المناسب للتبويب.
+- كل بطاقة تعرض: الاسم، النوع، رقم اللوحة، رقم الهاتف، شارة «غير نشط» عند التعطيل،
+  وأزرار **اتصال** (`tel:`) و**واتساب** (`wa.me`) عند وجود رقم، مع قائمة خيارات (تعديل/تعطيل/حذف).
+  الاتصال والواتساب يُفتحان عبر `url_launcher` في التطبيق الخارجي مع رسالة عربية عند الفشل.
+- `AddEditStakeholderDialog`: الاسم (إلزامي بتحقق)، الهاتف، رقم اللوحة، ونوع الجهة عبر `SegmentedButton`، ويُستخدم للإضافة والتعديل معًا.
+- الوصول من: أيقونة الإعدادات → «دليل المناديب والموردين»، وبطاقة وصول سريع في لوحة التحكم.
+
+## 26. اسم أمين المخزن والإعدادات
+
+- بطاقة **«بيانات أمين المخزن المسؤول»** في أعلى `SettingsScreen`: حقل اسم + زر حفظ يكتب في `app_settings` برسالة نجاح/خطأ، ويُقرأ تلقائيًا عند فتح الشاشة.
+- `ListTile` للانتقال المباشر إلى دليل المناديب والموردين من الإعدادات.
+- بطاقة وصول سريع للدليل في `DashboardView` إلى جانب سجل الحركات والتقارير.
+
+## 27. الوحدات المزدوجة (كرتون + عبوة)
+
+| الدالة | الناتج |
+|---|---|
+| `AppFormatters.bottlesCount(cartons, {bottlesPerCarton = 20})` | عدد العبوات الإجمالي. |
+| `AppFormatters.formatBottles(int)` | `25,000 عبوة`. |
+| `AppFormatters.bottlesFor(cartons)` | عدد العبوات المقابل للكراتين. |
+| `AppFormatters.formatQuantityWithBottles(cartons)` | `1,250 كرتون (25,000 عبوة)`. |
+
+وتُستخدم في بطاقة «إجمالي كراتين المياه» بلوحة التحكم لعرض المقابل بالعبوات.
+
+## 28. الملفات
+
+### منشأة
+
+`lib/features/stakeholders/data/models/stakeholder_model.dart` •
+`lib/features/stakeholders/data/stakeholder_repository.dart` •
+`lib/features/stakeholders/presentation/providers/stakeholder_provider.dart` •
+`lib/features/stakeholders/presentation/widgets/add_edit_stakeholder_dialog.dart` •
+`lib/features/stakeholders/presentation/screens/stakeholders_screen.dart` •
+`test/stakeholders_test.dart`
+
+### معدّلة
+
+`lib/core/database/database_tables.dart` • `lib/core/database/database_helper.dart` •
+`lib/core/constants/app_constants.dart` • `lib/core/utils/app_formatters.dart` •
+`lib/main.dart` • `lib/features/home/presentation/widgets/dashboard_view.dart` •
+`lib/features/backup/presentation/screens/settings_screen.dart` • `pubspec.yaml` (إضافة `url_launcher`)
+
+## 29. نتائج الفحص
+
+| الأمر | النتيجة |
+|---|---|
+| `flutter pub get` | ناجح |
+| `dart format lib test` | 0 تغييرات |
+| `flutter analyze` | **No issues found!** (Exit 0) |
+| `flutter test` | **All tests passed! — 68/68** (Exit 0) |
+
+الاختبارات الجديدة (12) في `test/stakeholders_test.dart`: إضافة واسترجاع المناديب والسائقين حسب النوع،
+التحديث وتعطيل الحالة فاختفاء الجهة من القوائم النشطة، البحث بالاسم/الهاتف/اللوحة مع حصر النوع،
+الحذف، بذر إعداد أمين المخزن وحفظه واسترجاعه والقيمة الافتراضية للمفاتيح الغائبة،
+تحميل المزوّد وإضافة جهة ورفض الاسم الفارغ وتعطيل مندوب، وحساب وتنسيق الوحدات المزدوجة.
+
+**لم يُنفَّذ:** فتح تطبيق الاتصال أو واتساب فعليًا على جهاز (تحتاج جهازًا ورقمًا حقيقيًا)،
+ولا تصفح الشاشات على محاكي/جهاز.
+
+---
+
+## 30. جاهزية المرحلة 10
+
+✅ **النظام جاهز للانتقال إلى «المرحلة 10: دورة العمليات المحدثة وسندات التالف وبدل التالف مع نظام التعليق والاعتماد».**
+
+- دليل جهات التعامل أصبح مرجعًا موحّدًا لهواتف المناديب والسائقين يمكن ربطه بسندات الصرف والاستلام لاحقًا.
+- جدول `app_settings` جاهز لتخزين إعدادات المرحلة القادمة (حدود الاعتماد، صلاحيات التعليق، إعدادات السندات).
+- طبقة الترقية (`onUpgrade`) تسمح بإضافة أعمدة وجداول الاعتماد والتالف الجديدة دون فقد بيانات العملاء الحاليين.

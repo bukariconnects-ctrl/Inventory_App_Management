@@ -50,6 +50,37 @@ abstract final class AppFormatters {
   static String cartons(num value) =>
       '${_integerFormat.format(value)} ${AppConstants.cartonUnit}';
 
+  /// يحوّل عدد الكراتين إلى عدد العبوات (كل كرتون = 20 عبوة افتراضيًا).
+  static int bottlesCount(
+    int cartons, {
+    int bottlesPerCarton = AppConstants.bottlesPerCarton,
+  }) {
+    return cartons * bottlesPerCarton;
+  }
+
+  /// نص عدد العبوات المقابل لعدد كراتين، مثال: `25,000 عبوة`.
+  static String bottlesFor(
+    int cartons, {
+    int bottlesPerCarton = AppConstants.bottlesPerCarton,
+  }) {
+    return formatBottles(
+      bottlesCount(cartons, bottlesPerCarton: bottlesPerCarton),
+    );
+  }
+
+  /// نص عدد عبوات مفرد، مثال: `40 عبوة`.
+  static String formatBottles(int count) =>
+      '${_integerFormat.format(count)} عبوة';
+
+  /// تنسيق الكمية بالوحدتين معًا، مثال: `1,250 كرتون (25,000 عبوة)`.
+  static String formatQuantityWithBottles(
+    int cartons, {
+    int bottlesPerCarton = AppConstants.bottlesPerCarton,
+  }) {
+    return '${AppFormatters.cartons(cartons)} '
+        '(${bottlesFor(cartons, bottlesPerCarton: bottlesPerCarton)})';
+  }
+
   /// تاريخ اليوم بصيغة `yyyy/MM/dd`.
   static String today() => _dateFormat.format(DateTime.now());
 }

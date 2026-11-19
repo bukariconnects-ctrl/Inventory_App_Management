@@ -71,6 +71,7 @@ class DatabaseHelper {
         version: AppConstants.databaseVersion,
         onConfigure: _configure,
         onCreate: _createSchema,
+        onUpgrade: _upgrade,
       ),
     );
   }
@@ -176,7 +177,92 @@ class DatabaseHelper {
       ON ${DatabaseTables.stocktakes} (warehouse_id)
     ''');
 
+    await _createStakeholdersSchema(db);
+    await _createSettingsSchema(db);
+
     await _seedDefaults(db);
+    await _seedSettings(db);
+  }
+
+  /// ترقية المخطط للإصدارات الأحدث دون فقد أي بيانات قائمة.
+  Future<void> _upgrade(Database db, int oldVersion, int newVersion) async {
+    // الإصدار 2: دليل جهات التعامل وإعدادات النظام.
+    if (oldVersion < 2) {
+      await _createStakeholdersSchema(db);
+      await _createSettingsSchema(db);
+      await _seedSettings(db);
+    }
+  }
+
+  /// جدول جهات التعامل: المناديب/الموزعون وسائقو المصنع/الموردون.
+  Future<void> _createStakeholdersSchema(Database db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS ${DatabaseTables.stakeholders} (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        phone TEXT,
+        type TEXT NOT NULL CHECK (type IN ('DISTRIBUTOR', 'DRIVER')),
+        vehicle_number TEXT,
+        is_active INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1)),
+        created_at TEXT NOT NULL
+      )
+    ''');
+
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_stakeholders_type
+      ON ${DatabaseTables.stakeholders} (type)
+    ''');
+  }
+
+  /// جدول إعدادات النظام (مفتاح/قيمة).
+  Future<void> _createSettingsSchema(Database db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS ${DatabaseTables.appSettings} (
+        key TEXT PRIMARY KEY,
+        value TEXT
+      )
+    ''');
+  }
+
+  /// يبذر إعدادات النظام الافتراضية دون استبدال القيم المحفوظة.
+  Future<void> _seedSettings(Database db) async {
+    await db.insert(DatabaseTables.appSettings, <String, Object?>{
+      'key': AppConstants.settingStorekeeperName,
+      'value': AppConstants.defaultStorekeeperName,
+    }, conflictAlgorithm: ConflictAlgorithm.ignore);
+  }
+
+  // ---------------------------------------------------------------------------
+  // إعدادات النظام
+  // ---------------------------------------------------------------------------
+
+  /// يقرأ إعدادًا محفوظًا، أو `defaultValue` إذا لم يوجد.
+  Future<String?> getSetting(String key, {String? defaultValue}) async {
+    final Database db = await database;
+    final List<Map<String, Object?>> rows = await db.query(
+      DatabaseTables.appSettings,
+      columns: <String>['value'],
+      where: 'key = ?',
+      whereArgs: <Object?>[key],
+      limit: 1,
+    );
+    if (rows.isEmpty) {
+      return defaultValue;
+    }
+    final Object? value = rows.first['value'];
+    if (value is String && value.trim().isNotEmpty) {
+      return value;
+    }
+    return defaultValue;
+  }
+
+  /// يحفظ إعدادًا (إضافة أو تحديث).
+  Future<void> setSetting(String key, String value) async {
+    final Database db = await database;
+    await db.insert(DatabaseTables.appSettings, <String, Object?>{
+      'key': key,
+      'value': value,
+    }, conflictAlgorithm: ConflictAlgorithm.replace);
   }
 
   /// البيانات الأولية: صنف كرتون الماء + المخزن الرئيسي + رصيد صفري.

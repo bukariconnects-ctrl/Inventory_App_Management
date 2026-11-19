@@ -34,7 +34,9 @@ abstract final class AppConstants {
   static const String databaseName = 'rawaa_wms.db';
 
   /// إصدار مخطط قاعدة البيانات (يُستخدم في الترقية لاحقًا).
-  static const int databaseVersion = 1;
+  ///
+  /// الإصدار 2 أضاف جدولَي `stakeholders` و`app_settings`.
+  static const int databaseVersion = 2;
 
   // ---------------------------------------------------------------------------
   // الصنف الأساسي: كرتون ماء
@@ -67,6 +69,16 @@ abstract final class AppConstants {
 
   /// موقع المخزن الافتراضي.
   static const String defaultWarehouseLocation = 'المبنى الرئيسي';
+
+  // ---------------------------------------------------------------------------
+  // إعدادات النظام (جدول app_settings)
+  // ---------------------------------------------------------------------------
+
+  /// مفتاح اسم أمين المخزن المسؤول في جدول الإعدادات.
+  static const String settingStorekeeperName = 'storekeeper_name';
+
+  /// الاسم الافتراضي لأمين المخزن عند أول تشغيل.
+  static const String defaultStorekeeperName = 'أمين المخزن';
 
   // ---------------------------------------------------------------------------
   // التوقيتات
