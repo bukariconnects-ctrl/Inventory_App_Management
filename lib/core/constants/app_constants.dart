@@ -36,7 +36,9 @@ abstract final class AppConstants {
   /// إصدار مخطط قاعدة البيانات (يُستخدم في الترقية لاحقًا).
   ///
   /// الإصدار 2 أضاف جدولَي `stakeholders` و`app_settings`.
-  static const int databaseVersion = 2;
+  /// الإصدار 3 أضاف عمودَي `status` و`rejection_reason` لجدول `transactions`
+  /// ودعم نوع الحركة `MARKET_REPLACEMENT`.
+  static const int databaseVersion = 3;
 
   // ---------------------------------------------------------------------------
   // الصنف الأساسي: كرتون ماء

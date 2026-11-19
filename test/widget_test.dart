@@ -11,6 +11,7 @@ import 'package:inventory_stock_app/features/home/presentation/screens/home_scre
 import 'package:inventory_stock_app/features/home/presentation/widgets/dashboard_view.dart';
 import 'package:inventory_stock_app/features/inventory/presentation/providers/inventory_provider.dart';
 import 'package:inventory_stock_app/features/reports/presentation/providers/reports_provider.dart';
+import 'package:inventory_stock_app/features/transactions/presentation/providers/transaction_provider.dart';
 import 'package:inventory_stock_app/features/splash/presentation/splash_screen.dart';
 import 'package:inventory_stock_app/features/warehouses/presentation/providers/warehouse_provider.dart';
 
@@ -81,11 +82,15 @@ void main() {
 
     final WarehouseProvider warehouses = WarehouseProvider();
     final InventoryProvider inventory = InventoryProvider();
+    final TransactionProvider transactions = TransactionProvider(
+      inventoryProvider: inventory,
+    );
 
     // الوصول لقاعدة البيانات يحتاج زمنًا حقيقيًا (خارج التوقيت الوهمي).
     await tester.runAsync(() async {
       await warehouses.loadWarehouses();
       await inventory.loadInventoryStatus();
+      await transactions.loadPendingApprovals(showLoader: false);
     });
 
     await tester.pumpWidget(
@@ -94,6 +99,9 @@ void main() {
         providers: <ChangeNotifierProvider<ChangeNotifier>>[
           ChangeNotifierProvider<WarehouseProvider>.value(value: warehouses),
           ChangeNotifierProvider<InventoryProvider>.value(value: inventory),
+          ChangeNotifierProvider<TransactionProvider>.value(
+            value: transactions,
+          ),
         ],
       ),
     );
@@ -114,10 +122,14 @@ void main() {
     final WarehouseProvider warehouses = WarehouseProvider();
     final InventoryProvider inventory = InventoryProvider();
     final ReportsProvider reports = ReportsProvider();
+    final TransactionProvider transactions = TransactionProvider(
+      inventoryProvider: inventory,
+    );
 
     await tester.runAsync(() async {
       await warehouses.loadWarehouses();
       await inventory.loadInventoryStatus();
+      await transactions.loadPendingApprovals(showLoader: false);
     });
 
     await tester.pumpWidget(
@@ -127,6 +139,9 @@ void main() {
           ChangeNotifierProvider<WarehouseProvider>.value(value: warehouses),
           ChangeNotifierProvider<InventoryProvider>.value(value: inventory),
           ChangeNotifierProvider<ReportsProvider>.value(value: reports),
+          ChangeNotifierProvider<TransactionProvider>.value(
+            value: transactions,
+          ),
         ],
       ),
     );

@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import '../../../../core/constants/app_constants.dart';
+import '../../../../core/database/database_helper.dart';
 import '../../../../core/theme/app_colors.dart';
 import '../../../../core/utils/app_formatters.dart';
 import '../../../inventory/presentation/providers/inventory_provider.dart';
@@ -10,7 +11,7 @@ import '../../../warehouses/data/models/warehouse_model.dart';
 import '../../../warehouses/presentation/providers/warehouse_provider.dart';
 import '../../data/models/transaction_model.dart';
 import '../providers/transaction_provider.dart';
-import '../widgets/transaction_success_dialog.dart';
+import '../widgets/pending_request_dialog.dart';
 
 /// أسباب التلف الشائعة المعروضة كشرائح اختيار.
 const List<String> damageReasons = <String>[
@@ -22,6 +23,9 @@ const List<String> damageReasons = <String>[
 ];
 
 /// سند إتلاف / هدر كراتين من أحد المخازن.
+///
+/// يُسجَّل المحضر بحالة `PENDING` باسم أمين المخزن المسجل في الإعدادات،
+/// ولا يُخصم الرصيد إلا بعد اعتماده من شاشة الطلبات المعلقة.
 class DamageVoucherScreen extends StatefulWidget {
   const DamageVoucherScreen({super.key});
 
@@ -33,7 +37,6 @@ class _DamageVoucherScreenState extends State<DamageVoucherScreen> {
   final GlobalKey<FormState> _formKey = GlobalKey<FormState>();
   final TextEditingController _quantityController = TextEditingController();
   final TextEditingController _detailsController = TextEditingController();
-  final TextEditingController _responsibleController = TextEditingController();
   final TextEditingController _notesController = TextEditingController();
 
   WarehouseProvider? _warehouseProvider;
@@ -41,6 +44,7 @@ class _DamageVoucherScreenState extends State<DamageVoucherScreen> {
   String? _selectedReason;
   String? _reasonError;
   String _voucherNumber = '';
+  String _storekeeperName = AppConstants.defaultStorekeeperName;
 
   @override
   void initState() {
@@ -57,6 +61,7 @@ class _DamageVoucherScreenState extends State<DamageVoucherScreen> {
     _syncDefaultWarehouse();
     _quantityController.addListener(_onQuantityChanged);
     _loadVoucherNumber();
+    _loadStorekeeperName();
   }
 
   @override
@@ -66,7 +71,6 @@ class _DamageVoucherScreenState extends State<DamageVoucherScreen> {
       ..removeListener(_onQuantityChanged)
       ..dispose();
     _detailsController.dispose();
-    _responsibleController.dispose();
     _notesController.dispose();
     super.dispose();
   }
@@ -79,6 +83,17 @@ class _DamageVoucherScreenState extends State<DamageVoucherScreen> {
       return;
     }
     setState(() => _voucherNumber = number);
+  }
+
+  Future<void> _loadStorekeeperName() async {
+    final String? name = await DatabaseHelper.instance.getSetting(
+      AppConstants.settingStorekeeperName,
+      defaultValue: AppConstants.defaultStorekeeperName,
+    );
+    if (!mounted || name == null) {
+      return;
+    }
+    setState(() => _storekeeperName = name);
   }
 
   void _syncDefaultWarehouse() {
@@ -131,44 +146,32 @@ class _DamageVoucherScreenState extends State<DamageVoucherScreen> {
 
     final TransactionProvider transactionProvider = context
         .read<TransactionProvider>();
-    final WarehouseProvider warehouseProvider = context
-        .read<WarehouseProvider>();
-    final InventoryProvider inventoryProvider = context
-        .read<InventoryProvider>();
     final ScaffoldMessengerState messenger = ScaffoldMessenger.of(context);
 
-    final TransactionModel? transaction = await transactionProvider
-        .createDamageVoucher(
+    final TransactionModel? request = await transactionProvider
+        .createInternalDamageRequest(
           warehouseId: warehouseId,
           quantity: quantity,
           reason: _composedReason,
-          responsibleName: _responsibleController.text,
+          responsibleName: _storekeeperName,
           notes: _notesController.text,
         );
 
     if (!mounted) {
       return;
     }
-    if (transaction == null) {
+    if (request == null) {
       messenger.showSnackBar(
         SnackBar(
           content: Text(
-            transactionProvider.errorMessage ?? 'تعذر حفظ سند الإتلاف.',
+            transactionProvider.errorMessage ?? 'تعذر رفع محضر الإتلاف.',
           ),
         ),
       );
       return;
     }
 
-    await TransactionSuccessDialog.show(
-      context,
-      transaction: transaction,
-      warehouseName:
-          warehouseProvider.warehouseById(warehouseId)?.name ?? 'المخزن',
-      balanceAfter: inventoryProvider.quantityFor(warehouseId),
-      warehouse: warehouseProvider.warehouseById(warehouseId),
-      item: inventoryProvider.item,
-    );
+    await PendingRequestDialog.show(context, transaction: request);
     if (mounted) {
       Navigator.of(context).pop(true);
     }
@@ -193,22 +196,25 @@ class _DamageVoucherScreenState extends State<DamageVoucherScreen> {
     final int excess = (requested != null && requested > availableStock)
         ? requested - availableStock
         : 0;
+    final int bottlesPerCarton =
+        inventoryProvider.item?.bottleCount ?? AppConstants.bottlesPerCarton;
     final bool canSubmit =
         _warehouseId != null &&
         requested != null &&
         requested > 0 &&
-        excess == 0 &&
         !transactionProvider.isSubmitting;
 
     return Scaffold(
-      appBar: AppBar(title: const Text('سند إتلاف / هدر كراتين')),
+      appBar: AppBar(title: const Text('محضر إتلاف / هدر كراتين')),
       body: Form(
         key: _formKey,
         child: ListView(
           padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
           children: <Widget>[
             _VoucherHeader(voucherNumber: _voucherNumber),
-            const SizedBox(height: 14),
+            const SizedBox(height: 12),
+            const _PendingNotice(),
+            const SizedBox(height: 16),
             if (activeWarehouses.isEmpty)
               const _NoActiveWarehouse()
             else
@@ -248,28 +254,35 @@ class _DamageVoucherScreenState extends State<DamageVoucherScreen> {
                 FilteringTextInputFormatter.digitsOnly,
               ],
               textInputAction: TextInputAction.next,
-              decoration: InputDecoration(
+              decoration: const InputDecoration(
                 labelText: 'الكمية التالفة',
                 hintText: 'مثال: 25',
                 suffixText: AppConstants.cartonUnit,
-                prefixIcon: const Icon(Icons.delete_outline_rounded, size: 20),
-                errorMaxLines: 2,
-                fillColor: excess > 0
-                    ? AppColors.danger.withValues(alpha: 0.05)
-                    : AppColors.surface,
+                prefixIcon: Icon(Icons.delete_outline_rounded, size: 20),
               ),
               validator: (String? value) {
                 final int? quantity = int.tryParse((value ?? '').trim());
                 if (quantity == null || quantity <= 0) {
                   return 'أدخل كمية صحيحة أكبر من صفر';
                 }
-                if (quantity > availableStock) {
-                  return 'الكمية المطلوبة تتجاوز الرصيد المتوفر في المخزن '
-                      'بمقدار ${quantity - availableStock} كرتون';
-                }
                 return null;
               },
             ),
+            if ((requested ?? 0) > 0) ...<Widget>[
+              const SizedBox(height: 8),
+              Align(
+                alignment: AlignmentDirectional.centerStart,
+                child: Text(
+                  'ما يعادل '
+                  '${AppFormatters.formatQuantityWithBottles(requested!, bottlesPerCarton: bottlesPerCarton)}',
+                  style: const TextStyle(
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w600,
+                    color: AppColors.textSecondary,
+                  ),
+                ),
+              ),
+            ],
             if (excess > 0) ...<Widget>[
               const SizedBox(height: 8),
               _StockWarning(excess: excess, available: availableStock),
@@ -329,22 +342,8 @@ class _DamageVoucherScreenState extends State<DamageVoucherScreen> {
                 alignLabelWithHint: true,
               ),
             ),
-            const SizedBox(height: 14),
-            TextFormField(
-              controller: _responsibleController,
-              textInputAction: TextInputAction.next,
-              decoration: const InputDecoration(
-                labelText: 'اسم أمين المخزن / المسؤول عن الإتلاف',
-                hintText: 'مثال: أمين المخزن سالم',
-                prefixIcon: Icon(Icons.person_outline_rounded, size: 20),
-              ),
-              validator: (String? value) {
-                if (value == null || value.trim().isEmpty) {
-                  return 'اسم المسؤول عن الإتلاف مطلوب';
-                }
-                return null;
-              },
-            ),
+            const SizedBox(height: 16),
+            _StorekeeperCard(name: _storekeeperName),
             const SizedBox(height: 14),
             TextFormField(
               controller: _notesController,
@@ -380,13 +379,109 @@ class _DamageVoucherScreenState extends State<DamageVoucherScreen> {
                     valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
                   ),
                 )
-              : const Icon(Icons.delete_outline_rounded, size: 20),
+              : const Icon(Icons.hourglass_top_rounded, size: 20),
           label: Text(
             transactionProvider.isSubmitting
-                ? 'جارٍ الحفظ...'
-                : 'تأكيد وقيد التالف',
+                ? 'جارٍ رفع المحضر...'
+                : 'رفع محضر إتلاف (قيد الاعتماد)',
           ),
         ),
+      ),
+    );
+  }
+}
+
+/// بطاقة أمين المخزن المسؤول عن المحضر (تُقرأ من الإعدادات).
+class _StorekeeperCard extends StatelessWidget {
+  const _StorekeeperCard({required this.name});
+
+  final String name;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      decoration: BoxDecoration(
+        color: AppColors.surface,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: AppColors.divider),
+      ),
+      child: Row(
+        children: <Widget>[
+          const Icon(Icons.badge_outlined, size: 20, color: AppColors.primary),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                const Text(
+                  'المسؤول عن الإتلاف',
+                  style: TextStyle(
+                    fontSize: 10.5,
+                    color: AppColors.textSecondary,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          TextButton(
+            key: const Key('damage_open_settings_button'),
+            onPressed: () {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content: Text(
+                    'يُعدَّل اسم أمين المخزن من الإعدادات ← البيانات الرسمية.',
+                  ),
+                ),
+              );
+            },
+            child: const Text('تعديل'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _PendingNotice extends StatelessWidget {
+  const _PendingNotice();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: AppColors.warning.withValues(alpha: 0.1),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppColors.warning.withValues(alpha: 0.3)),
+      ),
+      child: const Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Icon(Icons.info_outline_rounded, size: 18, color: AppColors.warning),
+          SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              'يُسجَّل المحضر كطلب معلق دون خصم الرصيد، '
+              'ويُخصم من المخزن عند اعتماده من شاشة الطلبات المعلقة.',
+              style: TextStyle(
+                fontSize: 11.5,
+                color: Color(0xFF8A5A00),
+                height: 1.6,
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -415,7 +510,7 @@ class _VoucherHeader extends StatelessWidget {
           ),
           const SizedBox(width: 8),
           const Text(
-            'رقم السند المتوقع',
+            'رقم المحضر المتوقع',
             style: TextStyle(fontSize: 12, color: AppColors.textSecondary),
           ),
           const Spacer(),
@@ -463,8 +558,8 @@ class _AvailableStockBadge extends StatelessWidget {
           Expanded(
             child: Text(
               hasWarehouse
-                  ? 'الرصيد المتاح في هذا المخزن: '
-                        '${AppFormatters.number(available)} كرتون'
+                  ? 'الرصيد الحالي في هذا المخزن: '
+                        '${AppFormatters.formatQuantityWithBottles(available)}'
                   : 'اختر المخزن لعرض الرصيد المتاح',
               style: TextStyle(
                 fontSize: 12,
@@ -490,9 +585,9 @@ class _StockWarning extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: AppColors.danger.withValues(alpha: 0.08),
+        color: AppColors.warning.withValues(alpha: 0.1),
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: AppColors.danger.withValues(alpha: 0.3)),
+        border: Border.all(color: AppColors.warning.withValues(alpha: 0.35)),
       ),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -500,16 +595,17 @@ class _StockWarning extends StatelessWidget {
           const Icon(
             Icons.warning_amber_rounded,
             size: 18,
-            color: AppColors.danger,
+            color: AppColors.warning,
           ),
           const SizedBox(width: 8),
           Expanded(
             child: Text(
-              'الكمية المطلوبة تتجاوز الرصيد المتوفر في المخزن '
-              'بمقدار $excess كرتون (المتاح ${AppFormatters.number(available)} كرتون).',
+              'الكمية تتجاوز الرصيد الحالي بمقدار $excess كرتون '
+              '(المتاح ${AppFormatters.number(available)} كرتون). '
+              'سيُرفض الاعتماد إن لم يتوفر الرصيد عند المراجعة.',
               style: const TextStyle(
                 fontSize: 12,
-                color: AppColors.danger,
+                color: Color(0xFF8A5A00),
                 height: 1.5,
               ),
             ),

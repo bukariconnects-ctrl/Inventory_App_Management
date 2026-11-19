@@ -120,28 +120,7 @@ class DatabaseHelper {
       )
     ''');
 
-    await db.execute('''
-      CREATE TABLE ${DatabaseTables.transactions} (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        transaction_type TEXT NOT NULL CHECK (
-          transaction_type IN ('INBOUND', 'OUTBOUND', 'DAMAGE', 'ADJUSTMENT')
-        ),
-        voucher_number TEXT NOT NULL UNIQUE,
-        warehouse_id INTEGER NOT NULL,
-        item_id INTEGER NOT NULL,
-        quantity INTEGER NOT NULL CHECK (quantity <> 0),
-        party_name TEXT,
-        order_reference TEXT,
-        vehicle_number TEXT,
-        reason TEXT,
-        notes TEXT,
-        created_at TEXT NOT NULL,
-        FOREIGN KEY (warehouse_id) REFERENCES ${DatabaseTables.warehouses} (id)
-          ON DELETE RESTRICT,
-        FOREIGN KEY (item_id) REFERENCES ${DatabaseTables.items} (id)
-          ON DELETE RESTRICT
-      )
-    ''');
+    await _createTransactionsTable(db, DatabaseTables.transactions);
 
     await db.execute('''
       CREATE TABLE ${DatabaseTables.stocktakes} (
@@ -169,6 +148,10 @@ class DatabaseHelper {
       ON ${DatabaseTables.transactions} (created_at)
     ''');
     await db.execute('''
+      CREATE INDEX idx_transactions_status
+      ON ${DatabaseTables.transactions} (status)
+    ''');
+    await db.execute('''
       CREATE INDEX idx_stock_balances_warehouse
       ON ${DatabaseTables.stockBalances} (warehouse_id)
     ''');
@@ -192,6 +175,84 @@ class DatabaseHelper {
       await _createSettingsSchema(db);
       await _seedSettings(db);
     }
+    // الإصدار 3: دورة الاعتماد (حالة السند + سبب الرفض) ونوع بدل التالف.
+    if (oldVersion < 3) {
+      await _upgradeTransactionsToV3(db);
+    }
+  }
+
+  /// جدول الحركات بحالته النهائية (بعد دعم دورة الاعتماد).
+  Future<void> _createTransactionsTable(Database db, String tableName) async {
+    await db.execute('''
+      CREATE TABLE $tableName (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        transaction_type TEXT NOT NULL CHECK (
+          transaction_type IN (
+            'INBOUND', 'OUTBOUND', 'DAMAGE', 'ADJUSTMENT', 'MARKET_REPLACEMENT'
+          )
+        ),
+        voucher_number TEXT NOT NULL UNIQUE,
+        warehouse_id INTEGER NOT NULL,
+        item_id INTEGER NOT NULL,
+        quantity INTEGER NOT NULL CHECK (quantity <> 0),
+        party_name TEXT,
+        order_reference TEXT,
+        vehicle_number TEXT,
+        reason TEXT,
+        notes TEXT,
+        status TEXT NOT NULL DEFAULT 'APPROVED'
+          CHECK (status IN ('APPROVED', 'PENDING', 'REJECTED')),
+        rejection_reason TEXT,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (warehouse_id) REFERENCES ${DatabaseTables.warehouses} (id)
+          ON DELETE RESTRICT,
+        FOREIGN KEY (item_id) REFERENCES ${DatabaseTables.items} (id)
+          ON DELETE RESTRICT
+      )
+    ''');
+  }
+
+  /// يرقّي جدول الحركات للإصدار 3 بإعادة بناء الجدول.
+  ///
+  /// إعادة البناء ضرورية لأن SQLite لا يسمح بتعديل قيد `CHECK` على نوع
+  /// الحركة عبر `ALTER TABLE`، ونحتاج السماح بالنوع الجديد
+  /// `MARKET_REPLACEMENT`. كل السندات القديمة تُنقل بحالة `APPROVED`.
+  Future<void> _upgradeTransactionsToV3(Database db) async {
+    const String legacyTable = 'transactions_legacy_v2';
+
+    await db.execute('DROP TABLE IF EXISTS $legacyTable');
+    await _createTransactionsTable(db, legacyTable);
+
+    await db.execute('''
+      INSERT INTO $legacyTable (
+        id, transaction_type, voucher_number, warehouse_id, item_id, quantity,
+        party_name, order_reference, vehicle_number, reason, notes, status,
+        created_at
+      )
+      SELECT
+        id, transaction_type, voucher_number, warehouse_id, item_id, quantity,
+        party_name, order_reference, vehicle_number, reason, notes, 'APPROVED',
+        created_at
+      FROM ${DatabaseTables.transactions}
+    ''');
+
+    await db.execute('DROP TABLE ${DatabaseTables.transactions}');
+    await db.execute(
+      'ALTER TABLE $legacyTable RENAME TO ${DatabaseTables.transactions}',
+    );
+
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_transactions_warehouse
+      ON ${DatabaseTables.transactions} (warehouse_id)
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_transactions_created_at
+      ON ${DatabaseTables.transactions} (created_at)
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_transactions_status
+      ON ${DatabaseTables.transactions} (status)
+    ''');
   }
 
   /// جدول جهات التعامل: المناديب/الموزعون وسائقو المصنع/الموردون.

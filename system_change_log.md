@@ -1,8 +1,8 @@
 # سجل التغييرات — نظام إدارة مخازن مياه رواء
 
-> **الحالة:** ✅✅ **Phase 9 Completed** — المراحل 1–9 مكتملة والنظام جاهز للاستخدام في مصنع مياه رواء
-> **المراحل السابقة:** Phase 1 (التأسيس) • Phase 2 (قاعدة البيانات) • Phase 3 (الواجهات) • Phase 4 (الاستلام والصرف) • Phase 5 (الإتلاف والجرد) • Phase 6 (محرك PDF) • Phase 7 (الأرشيف والتقارير) • Phase 8 (النسخ الاحتياطي والإعدادات) • Phase 9 (دليل جهات التعامل والإعدادات والوحدات المزدوجة)
-> **تاريخ التوثيق:** 13 نوفمبر 2026
+> **الحالة:** ✅✅ **Phase 10 Completed** — المراحل 1–10 مكتملة والنظام جاهز للاستخدام في مصنع مياه رواء
+> **المراحل السابقة:** Phase 1 (التأسيس) • Phase 2 (قاعدة البيانات) • Phase 3 (الواجهات) • Phase 4 (الاستلام والصرف) • Phase 5 (الإتلاف والجرد) • Phase 6 (محرك PDF) • Phase 7 (الأرشيف والتقارير) • Phase 8 (النسخ الاحتياطي والإعدادات) • Phase 9 (دليل جهات التعامل والإعدادات والوحدات المزدوجة) • Phase 10 (القوائم المنسدلة ودورة اعتماد بدل التالف والإتلاف)
+> **تاريخ التوثيق:** 19 نوفمبر 2026
 > **البيئة:** Flutter 3.32.0 • Dart 3.8.0 • sqflite 2.4.2 • sqflite_common_ffi 2.3.6 (سطح المكتب) • provider 6.1.5+1 • pdf 3.11.3 • printing 5.14.3
 
 ---
@@ -641,3 +641,81 @@ you must call databaseFactory = databaseFactoryFfi;
 - دليل جهات التعامل أصبح مرجعًا موحّدًا لهواتف المناديب والسائقين يمكن ربطه بسندات الصرف والاستلام لاحقًا.
 - جدول `app_settings` جاهز لتخزين إعدادات المرحلة القادمة (حدود الاعتماد، صلاحيات التعليق، إعدادات السندات).
 - طبقة الترقية (`onUpgrade`) تسمح بإضافة أعمدة وجداول الاعتماد والتالف الجديدة دون فقد بيانات العملاء الحاليين.
+
+---
+
+## 31. ترقية المخطط إلى الإصدار 3
+
+| العنصر | التفصيل |
+|---|---|
+| إصدار القاعدة | `AppConstants.databaseVersion = 3`. |
+| `status` | `TEXT NOT NULL DEFAULT 'APPROVED' CHECK (status IN ('APPROVED','PENDING','REJECTED'))` في جدول `transactions`. |
+| `rejection_reason` | `TEXT` اختياري يُحفظ عند الرفض فقط. |
+| نوع حركة جديد | `TransactionTypes.marketReplacement = 'MARKET_REPLACEMENT'` ببادئة سند `REP` (الإتلاف الداخلي يبقى `DAMAGE` ببادئة `DMG`). |
+| الترقية الآمنة | SQLite لا يسمح بتعديل قيد `CHECK` عبر `ALTER TABLE`، لذلك يبني `_upgradeTransactionsToV3` جدولًا جديدًا، ينسخ كل السندات القديمة بحالة `APPROVED` صريحة، يستبدل الجدول ويعيد إنشاء الفهارس — دون فقد أي بيانات. |
+| الفهرس | `idx_transactions_status` لتسريع استعلام الطلبات المعلقة. |
+
+كما أُضيفت `TransactionStatus` (`approved`/`pending`/`rejected`) مع `label(...)` العربية، و`TransactionTypes.requiresApproval(...)`، وحقلا `status`/`rejectionReason` في `TransactionModel` مع `isPending`/`isRejected`/`isApproved`/`isMarketReplacement`.
+
+## 32. دورة الاعتماد اليدوي وحماية الرصيد
+
+| الدالة (`TransactionRepository`) | السلوك |
+|---|---|
+| `createPendingMarketReplacement(...)` | سند `MARKET_REPLACEMENT` بحالة `PENDING`؛ **لا يخصم أي رصيد**. يرفض غياب المندوب أو أمر الصرف أو المبرر. |
+| `createPendingInternalDamage(...)` | سند `DAMAGE` بحالة `PENDING` باسم أمين المخزن؛ **لا يخصم أي رصيد**. |
+| `approvePendingTransaction(id)` | داخل `db.transaction()`: يجلب السند ويتحقق أنه `PENDING`، يفحص الرصيد (`InsufficientStockException`)، يخصم الكمية من `stock_balances`، ثم يحوّل الحالة إلى `APPROVED`. أي فشل يترك الرصيد والحالة كما هما. |
+| `rejectPendingTransaction(id, reason)` | يتحقق أن السند معلق، يسجل `REJECTED` + `rejection_reason` دون لمس الرصيد. |
+| `getPendingTransactions({warehouseId})` / `countPendingTransactions` | المعلقة فقط مرتبة بالأحدث. |
+
+`TransactionProvider` يضيف: `pendingTransactions`, `pendingCount`, `isLoadingPending`, `processingTransactionId`, `createMarketReplacementRequest`, `createInternalDamageRequest`, `loadPendingApprovals`, `approvePending`, `rejectPending`؛ ويعيد تحميل الأرصدة وقائمة المعلقات تلقائيًا بعد كل اعتماد أو رفض.
+
+## 33. القوائم المنسدلة والإضافة السريعة (+) وشاشة الاعتمادات
+
+- **سند الاستلام:** حقل السائق الحر أصبح `DropdownButtonFormField<StakeholderModel>` لسائقي المصنع النشطين، مع زر (+) يفتح `AddEditStakeholderDialog` بنوع `DRIVER` ويختار السائق الجديد تلقائيًا (عبر `StakeholderProvider.lastSavedStakeholder`)، وسطر «الكمية بالوحدتين» أسفل حقل الكمية.
+- **سند الصرف:** قائمة منسدلة للمناديب النشطين + زر (+)، وتعبئة «رقم لوحة السيارة» تلقائيًا من بيانات المندوب عند اختياره، وعرض الرصيد المتاح بالكرتون والعبوات.
+- **`MarketReplacementVoucherScreen`** (جديد): المخزن، المندوب المستفيد بزر (+)، رقم أمر الصرف الإلزامي، الكمية مع العبوات، مبرر التلف المرتجع، ثم «رفع طلب صرف بدل تالف (قيد الاعتماد)» الذي ينشئ سندًا `PENDING`.
+- **`DamageVoucherScreen`** (محدّث): يسجّل الإتلاف بحالة `PENDING` باسم أمين المخزن المقروء من `app_settings` (بطاقة للقراءة فقط مع تنبيه أنه يُعدَّل من الإعدادات)، وتنبيه أن تجاوز الرصيد قد يمنع الاعتماد لاحقًا، وزر «رفع محضر إتلاف (قيد الاعتماد)».
+- **`PendingApprovalsScreen`** (جديد): بطاقات لكل طلب تعرض النوع ورقم السند والطرف والمخزن والكمية بالوحدتين والسبب وشارة «بانتظار الاعتماد»؛ والنقر يفتح التفاصيل بزر أخضر **[اعتماد وتأكيد الخصم]** وزر أحمر **[رفض الطلب]** (يطلب سبب الرفض كتابةً).
+- **`PendingRequestDialog`** (جديد): نافذة تأكيد موحّدة بعد رفع أي طلب معلق توضح أن الرصيد لم يُخصم.
+- **لوحة التحكم:** شريط «N طلب معلق بانتظار الاعتماد» يفتح شاشة الاعتمادات، وبطاقتا إجراء سريع جديدتان: «صرف بدل تالف» و«الطلبات المعلقة».
+
+## 34. الملفات
+
+### منشأة
+
+`lib/features/transactions/presentation/screens/market_replacement_voucher_screen.dart` •
+`lib/features/transactions/presentation/screens/pending_approvals_screen.dart` •
+`lib/features/transactions/presentation/widgets/pending_request_dialog.dart` •
+`test/damage_approvals_test.dart`
+
+### معدّلة
+
+`lib/core/constants/app_constants.dart` • `lib/core/database/database_helper.dart` •
+`lib/features/transactions/data/models/transaction_model.dart` •
+`lib/features/transactions/data/transaction_repository.dart` •
+`lib/features/transactions/presentation/providers/transaction_provider.dart` •
+`lib/features/transactions/presentation/screens/inbound_voucher_screen.dart` •
+`lib/features/transactions/presentation/screens/outbound_voucher_screen.dart` •
+`lib/features/transactions/presentation/screens/damage_voucher_screen.dart` •
+`lib/features/stakeholders/presentation/providers/stakeholder_provider.dart` •
+`lib/features/home/presentation/widgets/dashboard_view.dart` •
+`lib/features/home/presentation/screens/home_screen.dart` •
+`test/transactions_ui_test.dart` • `test/widget_test.dart`
+
+## 35. نتائج الفحص وجاهزية المرحلة 11
+
+| الأمر | النتيجة |
+|---|---|
+| `dart format lib test` | 0 تغييرات في آخر تشغيل |
+| `flutter analyze` | **No issues found!** (Exit 0) |
+| `flutter test` | **All tests passed! — 77/77** (Exit 0) |
+
+اختبارات `test/damage_approvals_test.dart` (9): بقاء الرصيد ثابتًا عند إنشاء بدل التالف والإتلاف الداخلي، رفض البيانات الناقصة،
+الاعتماد الذي يخصم الرصيد ذريًا ويحوّل الحالة إلى `APPROVED`، منع الاعتماد المزدوج،
+فشل الاعتماد لنقص الرصيد مع بقاء الرصيد والحالة، الرفض مع حفظ السبب دون خصم،
+إلزام سبب الرفض ومنع رفض سند معتمد، واستعلامات المعلقات والترتيب والعدّ.
+
+**لم يُنفَّذ:** لم تُجرَّب الشاشات على محاكي/جهاز حقيقي، ولم يُبنَ APK أو نسخة Windows في هذه المرحلة،
+ولم يُختبر ترحيل قاعدة إصدار 2 فعلية إلى 3 على جهاز العميل (يُغطى منطقيًا بإعادة بناء الجدول في `onUpgrade`).
+
+✅ **النظام جاهز للانتقال إلى «المرحلة 11: محرك PDF المطور بالترويسة الرسمية لمياه رواء ومقاسات A5 و A4 والعلامة المائية».**

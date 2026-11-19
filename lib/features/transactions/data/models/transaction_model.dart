@@ -2,8 +2,13 @@
 abstract final class TransactionTypes {
   static const String inbound = 'INBOUND';
   static const String outbound = 'OUTBOUND';
+
+  /// الإتلاف المخزني الداخلي (بأمر أمين المخزن).
   static const String damage = 'DAMAGE';
   static const String adjustment = 'ADJUSTMENT';
+
+  /// صرف بدل تالف لمندوب عن كراتين مرتجعة من السوق.
+  static const String marketReplacement = 'MARKET_REPLACEMENT';
 
   /// كل الأنواع المسموح بها.
   static const List<String> all = <String>[
@@ -11,6 +16,7 @@ abstract final class TransactionTypes {
     outbound,
     damage,
     adjustment,
+    marketReplacement,
   ];
 
   /// بادئة رقم السند لكل نوع.
@@ -19,6 +25,7 @@ abstract final class TransactionTypes {
     outbound: 'ISS',
     damage: 'DMG',
     adjustment: 'ADJ',
+    marketReplacement: 'REP',
   };
 
   /// يعيد بادئة السند المناسبة لنوع الحركة.
@@ -35,9 +42,44 @@ abstract final class TransactionTypes {
   static bool isInflow(String transactionType) {
     return transactionType == inbound;
   }
+
+  /// هل يبدأ هذا النوع بحالة «بانتظار الاعتماد» قبل خصم الرصيد؟
+  static bool requiresApproval(String transactionType) {
+    return transactionType == damage || transactionType == marketReplacement;
+  }
 }
 
-/// حركة مخزنية واحدة (سند استلام/صرف/إتلاف/تسوية).
+/// حالات دورة الاعتماد التي يمر بها السند.
+abstract final class TransactionStatus {
+  /// سند معتمد ومخصوم من الرصيد (أو استلام/تسوية منفّذة).
+  static const String approved = 'APPROVED';
+
+  /// طلب مسجّل ولم يُخصم من الرصيد بعد، بانتظار قرار الاعتماد.
+  static const String pending = 'PENDING';
+
+  /// طلب مرفوض دون أي مساس بالرصيد.
+  static const String rejected = 'REJECTED';
+
+  /// كل الحالات المسموح بها في قاعدة البيانات.
+  static const List<String> all = <String>[approved, pending, rejected];
+
+  /// هل الحالة معروفة؟
+  static bool isKnown(String status) => all.contains(status);
+
+  /// الاسم العربي المعروض للحالة.
+  static String label(String status) {
+    switch (status) {
+      case pending:
+        return 'بانتظار الاعتماد';
+      case rejected:
+        return 'مرفوض';
+      default:
+        return 'معتمد';
+    }
+  }
+}
+
+/// حركة مخزنية واحدة (سند استلام/صرف/إتلاف/بدل تالف/تسوية).
 class TransactionModel {
   const TransactionModel({
     this.id,
@@ -51,6 +93,8 @@ class TransactionModel {
     this.vehicleNumber,
     this.reason,
     this.notes,
+    this.status = TransactionStatus.approved,
+    this.rejectionReason,
     required this.createdAt,
   });
 
@@ -68,6 +112,8 @@ class TransactionModel {
       vehicleNumber: map['vehicle_number'] as String?,
       reason: map['reason'] as String?,
       notes: map['notes'] as String?,
+      status: map['status'] as String? ?? TransactionStatus.approved,
+      rejectionReason: map['rejection_reason'] as String?,
       createdAt:
           DateTime.tryParse(map['created_at'] as String? ?? '') ??
           DateTime.now(),
@@ -99,7 +145,27 @@ class TransactionModel {
   /// سبب الإتلاف أو التسوية.
   final String? reason;
   final String? notes;
+
+  /// إحدى حالات [TransactionStatus].
+  final String status;
+
+  /// سبب الرفض عند `status == REJECTED`.
+  final String? rejectionReason;
+
   final DateTime createdAt;
+
+  /// هل السند ما زال بانتظار الاعتماد (لم يُخصم من الرصيد)؟
+  bool get isPending => status == TransactionStatus.pending;
+
+  /// هل السند مرفوض؟
+  bool get isRejected => status == TransactionStatus.rejected;
+
+  /// هل السند معتمد؟
+  bool get isApproved => status == TransactionStatus.approved;
+
+  /// هل السند صرف بدل تالف لمندوب؟
+  bool get isMarketReplacement =>
+      transactionType == TransactionTypes.marketReplacement;
 
   /// هل الحركة تزيد الرصيد (استلام أو تسوية زيادة)؟
   bool get isIncrement {
@@ -121,6 +187,8 @@ class TransactionModel {
       'vehicle_number': vehicleNumber,
       'reason': reason,
       'notes': notes,
+      'status': status,
+      'rejection_reason': rejectionReason,
       'created_at': createdAt.toIso8601String(),
     };
   }
@@ -137,6 +205,8 @@ class TransactionModel {
     String? vehicleNumber,
     String? reason,
     String? notes,
+    String? status,
+    String? rejectionReason,
     DateTime? createdAt,
   }) {
     return TransactionModel(
@@ -151,6 +221,8 @@ class TransactionModel {
       vehicleNumber: vehicleNumber ?? this.vehicleNumber,
       reason: reason ?? this.reason,
       notes: notes ?? this.notes,
+      status: status ?? this.status,
+      rejectionReason: rejectionReason ?? this.rejectionReason,
       createdAt: createdAt ?? this.createdAt,
     );
   }
@@ -172,6 +244,8 @@ class TransactionModel {
         other.vehicleNumber == vehicleNumber &&
         other.reason == reason &&
         other.notes == notes &&
+        other.status == status &&
+        other.rejectionReason == rejectionReason &&
         other.createdAt == createdAt;
   }
 
@@ -188,11 +262,14 @@ class TransactionModel {
     vehicleNumber,
     reason,
     notes,
+    status,
+    rejectionReason,
     createdAt,
   );
 
   @override
   String toString() =>
       'TransactionModel($transactionType, voucherNumber: $voucherNumber, '
-      'warehouseId: $warehouseId, itemId: $itemId, quantity: $quantity)';
+      'warehouseId: $warehouseId, itemId: $itemId, quantity: $quantity, '
+      'status: $status)';
 }

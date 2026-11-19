@@ -15,6 +15,7 @@ class StakeholderProvider extends ChangeNotifier {
   bool _isLoading = false;
   bool _isSaving = false;
   String? _errorMessage;
+  StakeholderModel? _lastSavedStakeholder;
 
   /// المناديب والموزعون النشطون.
   List<StakeholderModel> get distributors =>
@@ -27,6 +28,9 @@ class StakeholderProvider extends ChangeNotifier {
   bool get isLoading => _isLoading;
   bool get isSaving => _isSaving;
   String? get errorMessage => _errorMessage;
+
+  /// آخر جهة أُضيفت بنجاح (تُستخدم للاختيار التلقائي بعد الإضافة السريعة).
+  StakeholderModel? get lastSavedStakeholder => _lastSavedStakeholder;
 
   int get totalCount => _distributors.length + _drivers.length;
 
@@ -69,7 +73,7 @@ class StakeholderProvider extends ChangeNotifier {
         _errorMessage = validation;
         return false;
       }
-      await _repository.insertStakeholder(
+      _lastSavedStakeholder = await _repository.insertStakeholder(
         StakeholderModel(
           name: name.trim(),
           type: type,

@@ -4,7 +4,11 @@ import 'package:provider/provider.dart';
 
 import '../../../../core/constants/app_constants.dart';
 import '../../../../core/theme/app_colors.dart';
+import '../../../../core/utils/app_formatters.dart';
 import '../../../inventory/presentation/providers/inventory_provider.dart';
+import '../../../stakeholders/data/models/stakeholder_model.dart';
+import '../../../stakeholders/presentation/providers/stakeholder_provider.dart';
+import '../../../stakeholders/presentation/widgets/add_edit_stakeholder_dialog.dart';
 import '../../../warehouses/data/models/warehouse_model.dart';
 import '../../../warehouses/presentation/providers/warehouse_provider.dart';
 import '../../data/models/transaction_model.dart';
@@ -22,11 +26,11 @@ class InboundVoucherScreen extends StatefulWidget {
 class _InboundVoucherScreenState extends State<InboundVoucherScreen> {
   final GlobalKey<FormState> _formKey = GlobalKey<FormState>();
   final TextEditingController _quantityController = TextEditingController();
-  final TextEditingController _partyController = TextEditingController();
   final TextEditingController _notesController = TextEditingController();
 
   WarehouseProvider? _warehouseProvider;
   int? _warehouseId;
+  int? _driverId;
   String _voucherNumber = '';
 
   @override
@@ -42,14 +46,21 @@ class _InboundVoucherScreenState extends State<InboundVoucherScreen> {
       });
     }
     _syncDefaultWarehouse();
+    _quantityController.addListener(_onQuantityChanged);
     _loadVoucherNumber();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        context.read<StakeholderProvider>().loadStakeholders();
+      }
+    });
   }
 
   @override
   void dispose() {
     _warehouseProvider?.removeListener(_syncDefaultWarehouse);
-    _quantityController.dispose();
-    _partyController.dispose();
+    _quantityController
+      ..removeListener(_onQuantityChanged)
+      ..dispose();
     _notesController.dispose();
     super.dispose();
   }
@@ -77,12 +88,49 @@ class _InboundVoucherScreenState extends State<InboundVoucherScreen> {
     }
   }
 
+  void _onQuantityChanged() {
+    if (mounted) {
+      setState(() {});
+    }
+  }
+
+  int? get _requestedQuantity => int.tryParse(_quantityController.text.trim());
+
+  /// يفتح حوار إضافة سائق مصنع ثم يختاره تلقائيًا في القائمة.
+  Future<void> _addDriver() async {
+    final bool? added = await AddEditStakeholderDialog.show(
+      context,
+      initialType: StakeholderType.driver,
+    );
+    if (!mounted || added != true) {
+      return;
+    }
+    final StakeholderModel? created = context
+        .read<StakeholderProvider>()
+        .lastSavedStakeholder;
+    if (created?.id != null) {
+      setState(() => _driverId = created!.id);
+    }
+  }
+
+  StakeholderModel? _selectedDriver(List<StakeholderModel> drivers) {
+    for (final StakeholderModel driver in drivers) {
+      if (driver.id == _driverId) {
+        return driver;
+      }
+    }
+    return null;
+  }
+
   Future<void> _submit() async {
     if (!(_formKey.currentState?.validate() ?? false)) {
       return;
     }
     final int? warehouseId = _warehouseId;
-    if (warehouseId == null) {
+    final StakeholderModel? driver = _selectedDriver(
+      context.read<StakeholderProvider>().drivers,
+    );
+    if (warehouseId == null || driver == null) {
       return;
     }
 
@@ -98,7 +146,7 @@ class _InboundVoucherScreenState extends State<InboundVoucherScreen> {
         .createInboundReceipt(
           warehouseId: warehouseId,
           quantity: int.parse(_quantityController.text.trim()),
-          partyName: _partyController.text,
+          partyName: driver.name,
           notes: _notesController.text,
         );
 
@@ -138,6 +186,9 @@ class _InboundVoucherScreenState extends State<InboundVoucherScreen> {
         .watch<InventoryProvider>();
     final TransactionProvider transactionProvider = context
         .watch<TransactionProvider>();
+    final List<StakeholderModel> drivers = context
+        .watch<StakeholderProvider>()
+        .drivers;
 
     final List<WarehouseModel> activeWarehouses = warehouseProvider.warehouses
         .where((WarehouseModel w) => w.isActive)
@@ -148,6 +199,10 @@ class _InboundVoucherScreenState extends State<InboundVoucherScreen> {
         inventoryProvider.item?.bottleCount ?? AppConstants.bottlesPerCarton;
     final int bottleVolume =
         inventoryProvider.item?.bottleVolumeMl ?? AppConstants.bottleVolumeMl;
+    final int? selectedDriverId =
+        drivers.any((StakeholderModel d) => d.id == _driverId)
+        ? _driverId
+        : null;
 
     return Scaffold(
       appBar: AppBar(title: const Text('سند استلام مياه من المصنع')),
@@ -215,22 +270,68 @@ class _InboundVoucherScreenState extends State<InboundVoucherScreen> {
                 return null;
               },
             ),
-            const SizedBox(height: 14),
-            TextFormField(
-              controller: _partyController,
-              textInputAction: TextInputAction.next,
-              decoration: const InputDecoration(
-                labelText: 'اسم مسؤول التسليم من المصنع',
-                hintText: 'مثال: م. سالم الحسيني',
-                prefixIcon: Icon(Icons.person_outline_rounded, size: 20),
+            if ((_requestedQuantity ?? 0) > 0) ...<Widget>[
+              const SizedBox(height: 8),
+              _DualQuantityHint(
+                cartons: _requestedQuantity!,
+                bottlesPerCarton: bottleCount,
               ),
-              validator: (String? value) {
-                if (value == null || value.trim().isEmpty) {
-                  return 'اسم مسؤول التسليم مطلوب';
-                }
-                return null;
-              },
+            ],
+            const SizedBox(height: 14),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                Expanded(
+                  child: DropdownButtonFormField<StakeholderModel>(
+                    key: const Key('inbound_driver_dropdown'),
+                    value: selectedDriverId == null
+                        ? null
+                        : drivers.firstWhere(
+                            (StakeholderModel d) => d.id == selectedDriverId,
+                          ),
+                    isExpanded: true,
+                    decoration: const InputDecoration(
+                      labelText: 'سائق المصنع / مسؤول التسليم',
+                      prefixIcon: Icon(Icons.person_outline_rounded, size: 20),
+                    ),
+                    hint: const Text('اختر السائق'),
+                    items: drivers
+                        .map(
+                          (StakeholderModel driver) =>
+                              DropdownMenuItem<StakeholderModel>(
+                                value: driver,
+                                child: Text(
+                                  driver.phone == null
+                                      ? driver.name
+                                      : '${driver.name} — ${driver.phone}',
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                        )
+                        .toList(growable: false),
+                    onChanged: (StakeholderModel? value) =>
+                        setState(() => _driverId = value?.id),
+                    validator: (StakeholderModel? value) =>
+                        value == null ? 'اختر سائق المصنع' : null,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                IconButton.filledTonal(
+                  key: const Key('add_inbound_driver_button'),
+                  tooltip: 'إضافة سائق جديد',
+                  onPressed: _addDriver,
+                  icon: const Icon(Icons.add_rounded),
+                ),
+              ],
             ),
+            if (drivers.isEmpty) ...<Widget>[
+              const SizedBox(height: 6),
+              const Text(
+                'لا يوجد سائقون مسجلون — أضف سائقًا بزر (+) أو من دليل المناديب.',
+                style: TextStyle(fontSize: 11, color: AppColors.textSecondary),
+              ),
+            ],
             const SizedBox(height: 14),
             TextFormField(
               controller: _notesController,
@@ -270,6 +371,50 @@ class _InboundVoucherScreenState extends State<InboundVoucherScreen> {
                 : 'تأكيد واستلام الشحنة',
           ),
         ),
+      ),
+    );
+  }
+}
+
+/// سطر يوضح الكمية بالوحدتين (كرتون + عبوة).
+class _DualQuantityHint extends StatelessWidget {
+  const _DualQuantityHint({
+    required this.cartons,
+    required this.bottlesPerCarton,
+  });
+
+  final int cartons;
+  final int bottlesPerCarton;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: AppColors.mist,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppColors.outline),
+      ),
+      child: Row(
+        children: <Widget>[
+          const Icon(
+            Icons.water_drop_outlined,
+            size: 16,
+            color: AppColors.primary,
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              'الكمية بالوحدتين: '
+              '${AppFormatters.formatQuantityWithBottles(cartons, bottlesPerCarton: bottlesPerCarton)}',
+              style: const TextStyle(
+                fontSize: 11.5,
+                fontWeight: FontWeight.w600,
+                color: AppColors.primaryDark,
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }

@@ -8,6 +8,7 @@ import '../../../inventory/presentation/providers/inventory_provider.dart';
 import '../../../inventory/presentation/screens/inventory_screen.dart';
 import '../../../reports/presentation/providers/reports_provider.dart';
 import '../../../reports/presentation/screens/reports_hub_screen.dart';
+import '../../../transactions/presentation/providers/transaction_provider.dart';
 import '../../../warehouses/presentation/providers/warehouse_provider.dart';
 import '../../../warehouses/presentation/screens/warehouses_screen.dart';
 import '../widgets/dashboard_view.dart';
@@ -38,9 +39,12 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _loadData({bool showLoader = true}) async {
     final WarehouseProvider warehouses = context.read<WarehouseProvider>();
     final InventoryProvider inventory = context.read<InventoryProvider>();
+    final TransactionProvider transactions = context
+        .read<TransactionProvider>();
     await Future.wait(<Future<void>>[
       warehouses.loadWarehouses(showLoader: showLoader),
       inventory.loadInventoryStatus(showLoader: showLoader),
+      transactions.loadPendingApprovals(showLoader: false),
     ]);
   }
 

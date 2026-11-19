@@ -6,6 +6,9 @@ import '../../../../core/constants/app_constants.dart';
 import '../../../../core/theme/app_colors.dart';
 import '../../../../core/utils/app_formatters.dart';
 import '../../../inventory/presentation/providers/inventory_provider.dart';
+import '../../../stakeholders/data/models/stakeholder_model.dart';
+import '../../../stakeholders/presentation/providers/stakeholder_provider.dart';
+import '../../../stakeholders/presentation/widgets/add_edit_stakeholder_dialog.dart';
 import '../../../warehouses/data/models/warehouse_model.dart';
 import '../../../warehouses/presentation/providers/warehouse_provider.dart';
 import '../../data/models/transaction_model.dart';
@@ -24,12 +27,12 @@ class _OutboundVoucherScreenState extends State<OutboundVoucherScreen> {
   final GlobalKey<FormState> _formKey = GlobalKey<FormState>();
   final TextEditingController _quantityController = TextEditingController();
   final TextEditingController _orderController = TextEditingController();
-  final TextEditingController _partyController = TextEditingController();
   final TextEditingController _vehicleController = TextEditingController();
   final TextEditingController _notesController = TextEditingController();
 
   WarehouseProvider? _warehouseProvider;
   int? _warehouseId;
+  int? _distributorId;
   String _voucherNumber = '';
 
   @override
@@ -47,6 +50,11 @@ class _OutboundVoucherScreenState extends State<OutboundVoucherScreen> {
     _syncDefaultWarehouse();
     _quantityController.addListener(_onQuantityChanged);
     _loadVoucherNumber();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        context.read<StakeholderProvider>().loadStakeholders();
+      }
+    });
   }
 
   @override
@@ -56,7 +64,6 @@ class _OutboundVoucherScreenState extends State<OutboundVoucherScreen> {
       ..removeListener(_onQuantityChanged)
       ..dispose();
     _orderController.dispose();
-    _partyController.dispose();
     _vehicleController.dispose();
     _notesController.dispose();
     super.dispose();
@@ -93,13 +100,53 @@ class _OutboundVoucherScreenState extends State<OutboundVoucherScreen> {
 
   int? get _requestedQuantity => int.tryParse(_quantityController.text.trim());
 
+  /// يفتح حوار إضافة مندوب ثم يختاره ويملأ لوحة سيارته تلقائيًا.
+  Future<void> _addDistributor() async {
+    final bool? added = await AddEditStakeholderDialog.show(
+      context,
+      initialType: StakeholderType.distributor,
+    );
+    if (!mounted || added != true) {
+      return;
+    }
+    final StakeholderModel? created = context
+        .read<StakeholderProvider>()
+        .lastSavedStakeholder;
+    if (created == null) {
+      return;
+    }
+    setState(() {
+      _distributorId = created.id;
+      _vehicleController.text = created.vehicleNumber ?? '';
+    });
+  }
+
+  StakeholderModel? _selectedDistributor(List<StakeholderModel> distributors) {
+    for (final StakeholderModel distributor in distributors) {
+      if (distributor.id == _distributorId) {
+        return distributor;
+      }
+    }
+    return null;
+  }
+
+  void _onDistributorChanged(StakeholderModel? distributor) {
+    setState(() {
+      _distributorId = distributor?.id;
+      _vehicleController.text = distributor?.vehicleNumber ?? '';
+    });
+  }
+
   Future<void> _submit() async {
     if (!(_formKey.currentState?.validate() ?? false)) {
       return;
     }
     final int? warehouseId = _warehouseId;
     final int? quantity = _requestedQuantity;
-    if (warehouseId == null || quantity == null) {
+    final StakeholderModel? distributor = _selectedDistributor(
+      context.read<StakeholderProvider>().distributors,
+    );
+    if (warehouseId == null || quantity == null || distributor == null) {
       return;
     }
 
@@ -116,7 +163,7 @@ class _OutboundVoucherScreenState extends State<OutboundVoucherScreen> {
           warehouseId: warehouseId,
           quantity: quantity,
           orderReference: _orderController.text,
-          partyName: _partyController.text,
+          partyName: distributor.name,
           vehicleNumber: _vehicleController.text,
           notes: _notesController.text,
         );
@@ -157,6 +204,9 @@ class _OutboundVoucherScreenState extends State<OutboundVoucherScreen> {
         .watch<InventoryProvider>();
     final TransactionProvider transactionProvider = context
         .watch<TransactionProvider>();
+    final List<StakeholderModel> distributors = context
+        .watch<StakeholderProvider>()
+        .distributors;
 
     final List<WarehouseModel> activeWarehouses = warehouseProvider.warehouses
         .where((WarehouseModel w) => w.isActive)
@@ -168,11 +218,15 @@ class _OutboundVoucherScreenState extends State<OutboundVoucherScreen> {
     final int excess = (requested != null && requested > availableStock)
         ? requested - availableStock
         : 0;
+    final StakeholderModel? selectedDistributor = _selectedDistributor(
+      distributors,
+    );
     final bool canSubmit =
         _warehouseId != null &&
         requested != null &&
         requested > 0 &&
         excess == 0 &&
+        selectedDistributor != null &&
         !transactionProvider.isSubmitting;
 
     return Scaffold(
@@ -217,6 +271,61 @@ class _OutboundVoucherScreenState extends State<OutboundVoucherScreen> {
               hasWarehouse: _warehouseId != null,
             ),
             const SizedBox(height: 16),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                Expanded(
+                  child: DropdownButtonFormField<StakeholderModel>(
+                    key: const Key('outbound_distributor_dropdown'),
+                    value: selectedDistributor,
+                    isExpanded: true,
+                    decoration: const InputDecoration(
+                      labelText: 'المندوب / جهة الصرف',
+                      prefixIcon: Icon(Icons.person_outline_rounded, size: 20),
+                    ),
+                    hint: const Text('اختر المندوب'),
+                    items: distributors
+                        .map(
+                          (StakeholderModel distributor) =>
+                              DropdownMenuItem<StakeholderModel>(
+                                value: distributor,
+                                child: Text(
+                                  distributor.phone == null
+                                      ? distributor.name
+                                      : '${distributor.name} — '
+                                            '${distributor.phone}',
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                        )
+                        .toList(growable: false),
+                    onChanged: _onDistributorChanged,
+                    validator: (StakeholderModel? value) =>
+                        value == null ? 'اختر المندوب' : null,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                IconButton.filledTonal(
+                  key: const Key('add_outbound_distributor_button'),
+                  tooltip: 'إضافة مندوب جديد',
+                  onPressed: _addDistributor,
+                  icon: const Icon(Icons.add_rounded),
+                ),
+              ],
+            ),
+            if (distributors.isEmpty) ...<Widget>[
+              const SizedBox(height: 6),
+              const Text(
+                'لا يوجد مناديب مسجلون — أضف مندوبًا بزر (+) أو من دليل المناديب.',
+                style: TextStyle(fontSize: 11, color: AppColors.textSecondary),
+              ),
+            ],
+            if (selectedDistributor?.vehicleNumber != null) ...<Widget>[
+              const SizedBox(height: 8),
+              _DistributorInfo(distributor: selectedDistributor!),
+            ],
+            const SizedBox(height: 14),
             TextFormField(
               controller: _quantityController,
               keyboardType: TextInputType.number,
@@ -246,6 +355,15 @@ class _OutboundVoucherScreenState extends State<OutboundVoucherScreen> {
                 return null;
               },
             ),
+            if (requested != null && requested > 0) ...<Widget>[
+              const SizedBox(height: 8),
+              _DualQuantityHint(
+                cartons: requested,
+                bottlesPerCarton:
+                    inventoryProvider.item?.bottleCount ??
+                    AppConstants.bottlesPerCarton,
+              ),
+            ],
             if (excess > 0) ...<Widget>[
               const SizedBox(height: 8),
               _StockWarning(excess: excess, available: availableStock),
@@ -268,27 +386,11 @@ class _OutboundVoucherScreenState extends State<OutboundVoucherScreen> {
             ),
             const SizedBox(height: 14),
             TextFormField(
-              controller: _partyController,
-              textInputAction: TextInputAction.next,
-              decoration: const InputDecoration(
-                labelText: 'اسم المندوب / جهة الصرف',
-                hintText: 'مثال: المندوب أحمد السالم',
-                prefixIcon: Icon(Icons.person_outline_rounded, size: 20),
-              ),
-              validator: (String? value) {
-                if (value == null || value.trim().isEmpty) {
-                  return 'اسم المندوب أو جهة الصرف مطلوب';
-                }
-                return null;
-              },
-            ),
-            const SizedBox(height: 14),
-            TextFormField(
               controller: _vehicleController,
               textInputAction: TextInputAction.next,
               decoration: const InputDecoration(
-                labelText: 'رقم لوحة الشاحنة / السيارة (اختياري)',
-                hintText: 'مثال: 1234-أ ب ج',
+                labelText: 'رقم لوحة الشاحنة / السيارة',
+                hintText: 'يُملأ تلقائيًا من بيانات المندوب',
                 prefixIcon: Icon(Icons.local_shipping_outlined, size: 20),
               ),
             ),
@@ -329,6 +431,72 @@ class _OutboundVoucherScreenState extends State<OutboundVoucherScreen> {
                 ? 'جارٍ الحفظ...'
                 : 'تأكيد وصرف الكمية',
           ),
+        ),
+      ),
+    );
+  }
+}
+
+/// بطاقة معلومات المندوب المختار (الهاتف ورقم المركبة).
+class _DistributorInfo extends StatelessWidget {
+  const _DistributorInfo({required this.distributor});
+
+  final StakeholderModel distributor;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: AppColors.surfaceVariant,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppColors.outline),
+      ),
+      child: Row(
+        children: <Widget>[
+          const Icon(
+            Icons.local_shipping_outlined,
+            size: 16,
+            color: AppColors.primary,
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              'رقم المركبة: ${distributor.vehicleNumber}',
+              style: const TextStyle(
+                fontSize: 11.5,
+                fontWeight: FontWeight.w600,
+                color: AppColors.primaryDark,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// سطر الكمية بالوحدتين (كرتون + عبوة).
+class _DualQuantityHint extends StatelessWidget {
+  const _DualQuantityHint({
+    required this.cartons,
+    required this.bottlesPerCarton,
+  });
+
+  final int cartons;
+  final int bottlesPerCarton;
+
+  @override
+  Widget build(BuildContext context) {
+    return Align(
+      alignment: AlignmentDirectional.centerStart,
+      child: Text(
+        'ما يعادل '
+        '${AppFormatters.formatQuantityWithBottles(cartons, bottlesPerCarton: bottlesPerCarton)}',
+        style: const TextStyle(
+          fontSize: 11.5,
+          fontWeight: FontWeight.w600,
+          color: AppColors.textSecondary,
         ),
       ),
     );
@@ -376,7 +544,7 @@ class _VoucherHeader extends StatelessWidget {
   }
 }
 
-/// مؤشر الرصيد المتاح في المخزن المختار.
+/// مؤشر الرصيد المتاح في المخزن المختار بالوحدتين.
 class _AvailableStockBadge extends StatelessWidget {
   const _AvailableStockBadge({
     required this.available,
@@ -408,7 +576,7 @@ class _AvailableStockBadge extends StatelessWidget {
             child: Text(
               hasWarehouse
                   ? 'الرصيد المتاح في هذا المخزن: '
-                        '${AppFormatters.number(available)} كرتون'
+                        '${AppFormatters.formatQuantityWithBottles(available)}'
                   : 'اختر المخزن لعرض الرصيد المتاح',
               style: TextStyle(
                 fontSize: 12,

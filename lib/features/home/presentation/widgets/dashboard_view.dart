@@ -9,9 +9,12 @@ import '../../../inventory/data/models/stock_balance_status.dart';
 import '../../../inventory/presentation/providers/inventory_provider.dart';
 import '../../../stakeholders/presentation/screens/stakeholders_screen.dart';
 import '../../../stocktake/presentation/screens/stocktake_screen.dart';
+import '../../../transactions/presentation/providers/transaction_provider.dart';
 import '../../../transactions/presentation/screens/damage_voucher_screen.dart';
 import '../../../transactions/presentation/screens/inbound_voucher_screen.dart';
+import '../../../transactions/presentation/screens/market_replacement_voucher_screen.dart';
 import '../../../transactions/presentation/screens/outbound_voucher_screen.dart';
+import '../../../transactions/presentation/screens/pending_approvals_screen.dart';
 import '../../../warehouses/presentation/providers/warehouse_provider.dart';
 
 /// محتوى لوحة التحكم: تنبيه النقص، الإحصائيات، وحالة المخازن السريعة.
@@ -36,6 +39,9 @@ class DashboardView extends StatelessWidget {
     await Future.wait(<Future<void>>[
       warehouseProvider.loadWarehouses(showLoader: false),
       inventoryProvider.loadInventoryStatus(showLoader: false),
+      context.read<TransactionProvider>().loadPendingApprovals(
+        showLoader: false,
+      ),
     ]);
   }
 
@@ -43,6 +49,8 @@ class DashboardView extends StatelessWidget {
   Widget build(BuildContext context) {
     final InventoryProvider inventory = context.watch<InventoryProvider>();
     final WarehouseProvider warehouses = context.watch<WarehouseProvider>();
+    final TransactionProvider transactions = context
+        .watch<TransactionProvider>();
 
     if (inventory.isLoading && inventory.statuses.isEmpty) {
       return const Center(child: CircularProgressIndicator());
@@ -91,6 +99,18 @@ class DashboardView extends StatelessWidget {
         padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
         physics: const AlwaysScrollableScrollPhysics(),
         children: <Widget>[
+          if (transactions.pendingCount > 0) ...<Widget>[
+            _PendingApprovalsBanner(
+              count: transactions.pendingCount,
+              onTap: () => Navigator.of(context).push(
+                MaterialPageRoute<void>(
+                  builder: (BuildContext context) =>
+                      const PendingApprovalsScreen(),
+                ),
+              ),
+            ),
+            const SizedBox(height: 14),
+          ],
           if (inventory.hasLowStockAlert) ...<Widget>[
             _LowStockBanner(
               lowStockCount: inventory.lowStockCount,
@@ -181,6 +201,72 @@ class DashboardView extends StatelessWidget {
               ),
             ),
         ],
+      ),
+    );
+  }
+}
+
+/// شريط يظهر عند وجود طلبات معلقة بانتظار الاعتماد.
+class _PendingApprovalsBanner extends StatelessWidget {
+  const _PendingApprovalsBanner({required this.count, required this.onTap});
+
+  final int count;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        key: const Key('dashboard_pending_banner'),
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.all(14),
+          child: Row(
+            children: <Widget>[
+              Container(
+                width: 38,
+                height: 38,
+                decoration: BoxDecoration(
+                  color: AppColors.warning.withValues(alpha: 0.16),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: const Icon(
+                  Icons.hourglass_top_rounded,
+                  color: AppColors.warning,
+                  size: 21,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: <Widget>[
+                    Text(
+                      '$count ${count == 1 ? 'طلب معلق' : 'طلبات معلقة'} '
+                      'بانتظار الاعتماد',
+                      style: const TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w800,
+                        color: Color(0xFF8A5A00),
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    const Text(
+                      'بدل تالف ومحاضر إتلاف لم تُخصم من الرصيد بعد.',
+                      style: TextStyle(fontSize: 11, color: Color(0xFF8A5A00)),
+                    ),
+                  ],
+                ),
+              ),
+              const Icon(
+                Icons.chevron_left_rounded,
+                size: 20,
+                color: Color(0xFF8A5A00),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -531,26 +617,55 @@ class _SecondaryActions extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Row(
+    return Column(
       children: <Widget>[
-        Expanded(
-          child: _QuickActionCard(
-            title: 'تسجيل تالف',
-            subtitle: 'سند إتلاف',
-            icon: Icons.report_gmailerrorred_rounded,
-            colors: <Color>[AppColors.warning, AppColors.danger],
-            onTap: () => _open(context, const DamageVoucherScreen()),
-          ),
+        Row(
+          children: <Widget>[
+            Expanded(
+              child: _QuickActionCard(
+                title: 'تسجيل تالف مخزني',
+                subtitle: 'محضر إتلاف',
+                icon: Icons.report_gmailerrorred_rounded,
+                colors: <Color>[AppColors.warning, AppColors.danger],
+                onTap: () => _open(context, const DamageVoucherScreen()),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: _QuickActionCard(
+                title: 'جرد وتسوية',
+                subtitle: 'جرد المخزن',
+                icon: Icons.fact_check_rounded,
+                colors: <Color>[AppColors.primaryDark, AppColors.cyan],
+                onTap: () => _open(context, const StocktakeScreen()),
+              ),
+            ),
+          ],
         ),
-        const SizedBox(width: 12),
-        Expanded(
-          child: _QuickActionCard(
-            title: 'جرد وتسوية',
-            subtitle: 'جرد المخزن',
-            icon: Icons.fact_check_rounded,
-            colors: <Color>[AppColors.primaryDark, AppColors.cyan],
-            onTap: () => _open(context, const StocktakeScreen()),
-          ),
+        const SizedBox(height: 12),
+        Row(
+          children: <Widget>[
+            Expanded(
+              child: _QuickActionCard(
+                title: 'صرف بدل تالف',
+                subtitle: 'لمندوب — قيد الاعتماد',
+                icon: Icons.swap_horiz_rounded,
+                colors: <Color>[AppColors.cyan, AppColors.primaryDark],
+                onTap: () =>
+                    _open(context, const MarketReplacementVoucherScreen()),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: _QuickActionCard(
+                title: 'الطلبات المعلقة',
+                subtitle: 'اعتماد ورفض',
+                icon: Icons.pending_actions_rounded,
+                colors: <Color>[AppColors.warning, AppColors.danger],
+                onTap: () => _open(context, const PendingApprovalsScreen()),
+              ),
+            ),
+          ],
         ),
       ],
     );

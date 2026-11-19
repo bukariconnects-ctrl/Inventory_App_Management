@@ -8,6 +8,7 @@ import 'package:inventory_stock_app/core/constants/app_constants.dart';
 import 'package:inventory_stock_app/core/database/database_helper.dart';
 import 'package:inventory_stock_app/core/theme/app_colors.dart';
 import 'package:inventory_stock_app/features/inventory/presentation/providers/inventory_provider.dart';
+import 'package:inventory_stock_app/features/stakeholders/presentation/providers/stakeholder_provider.dart';
 import 'package:inventory_stock_app/features/transactions/data/models/transaction_model.dart';
 import 'package:inventory_stock_app/features/transactions/presentation/providers/transaction_provider.dart';
 import 'package:inventory_stock_app/features/transactions/presentation/screens/inbound_voucher_screen.dart';
@@ -47,6 +48,7 @@ void main() {
   late WarehouseProvider warehouseProvider;
   late InventoryProvider inventoryProvider;
   late TransactionProvider transactionProvider;
+  late StakeholderProvider stakeholderProvider;
   late int warehouseId;
 
   setUpAll(sqfliteFfiInit);
@@ -65,6 +67,7 @@ void main() {
     transactionProvider = TransactionProvider(
       inventoryProvider: inventoryProvider,
     );
+    stakeholderProvider = StakeholderProvider();
 
     await warehouseProvider.loadWarehouses();
     await inventoryProvider.loadInventoryStatus();
@@ -159,6 +162,9 @@ void main() {
           ChangeNotifierProvider<TransactionProvider>.value(
             value: transactionProvider,
           ),
+          ChangeNotifierProvider<StakeholderProvider>.value(
+            value: stakeholderProvider,
+          ),
         ],
       ),
     );
@@ -188,6 +194,9 @@ void main() {
           ),
           ChangeNotifierProvider<TransactionProvider>.value(
             value: transactionProvider,
+          ),
+          ChangeNotifierProvider<StakeholderProvider>.value(
+            value: stakeholderProvider,
           ),
         ],
       ),

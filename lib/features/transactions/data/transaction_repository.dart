@@ -212,6 +212,276 @@ class TransactionRepository {
   }
 
   // ---------------------------------------------------------------------------
+  // الطلبات المعلقة ودورة الاعتماد
+  // ---------------------------------------------------------------------------
+
+  /// يسجّل طلب صرف بدل تالف لمندوب بحالة `PENDING`.
+  ///
+  /// **قاعدة صارمة:** لا يُخصم أي رصيد من `stock_balances` عند الإنشاء؛
+  /// الخصم يتم فقط عند اعتماد الطلب عبر [approvePendingTransaction].
+  Future<TransactionModel> createPendingMarketReplacement({
+    required int warehouseId,
+    required int itemId,
+    required int quantity,
+    required String partyName,
+    required String orderReference,
+    required String reason,
+    String? vehicleNumber,
+    String? notes,
+    DateTime? createdAt,
+  }) async {
+    _validatePositiveQuantity(quantity);
+    if (partyName.trim().isEmpty) {
+      throw ArgumentError('اسم المندوب المستفيد مطلوب.');
+    }
+    if (orderReference.trim().isEmpty) {
+      throw ArgumentError('رقم أمر الصرف الإداري مطلوب.');
+    }
+    if (reason.trim().isEmpty) {
+      throw ArgumentError('مبرر بدل التالف مطلوب.');
+    }
+
+    return _insertPendingRequest(
+      transactionType: TransactionTypes.marketReplacement,
+      warehouseId: warehouseId,
+      itemId: itemId,
+      quantity: quantity,
+      partyName: partyName.trim(),
+      orderReference: orderReference.trim(),
+      vehicleNumber: _cleanOptional(vehicleNumber),
+      reason: reason.trim(),
+      notes: _cleanOptional(notes),
+      timestamp: createdAt ?? DateTime.now(),
+    );
+  }
+
+  /// يسجّل محضر إتلاف مخزني داخلي بحالة `PENDING` باسم أمين المخزن.
+  ///
+  /// **قاعدة صارمة:** لا يُخصم أي رصيد عند الإنشاء.
+  Future<TransactionModel> createPendingInternalDamage({
+    required int warehouseId,
+    required int itemId,
+    required int quantity,
+    required String reason,
+    required String responsibleName,
+    String? notes,
+    DateTime? createdAt,
+  }) async {
+    _validatePositiveQuantity(quantity);
+    if (reason.trim().isEmpty) {
+      throw ArgumentError('سبب الإتلاف مطلوب.');
+    }
+    if (responsibleName.trim().isEmpty) {
+      throw ArgumentError('اسم أمين المخزن المسؤول مطلوب.');
+    }
+
+    return _insertPendingRequest(
+      transactionType: TransactionTypes.damage,
+      warehouseId: warehouseId,
+      itemId: itemId,
+      quantity: quantity,
+      partyName: responsibleName.trim(),
+      reason: reason.trim(),
+      notes: _cleanOptional(notes),
+      timestamp: createdAt ?? DateTime.now(),
+    );
+  }
+
+  /// يعتمد طلبًا معلقًا: يتحقق من الرصيد، يخصمه، ثم يحوّل الحالة إلى
+  /// `APPROVED` — كل ذلك داخل معاملة واحدة (ذرّية بالكامل).
+  ///
+  /// يرمي [InsufficientStockException] إذا لم يعد الرصيد كافيًا، و
+  /// [ArgumentError] إذا لم يكن السند معلقًا أو غير موجود.
+  Future<TransactionModel> approvePendingTransaction(int transactionId) async {
+    final Database db = await _helper.database;
+
+    return db.transaction<TransactionModel>((Transaction txn) async {
+      final TransactionModel pending = await _requirePending(
+        txn,
+        transactionId,
+      );
+
+      final int current = await _currentQuantity(
+        txn,
+        pending.warehouseId,
+        pending.itemId,
+      );
+      if (current < pending.quantity) {
+        throw InsufficientStockException(
+          availableQuantity: current,
+          requestedQuantity: pending.quantity,
+          warehouseId: pending.warehouseId,
+          itemId: pending.itemId,
+          operationType: pending.transactionType,
+        );
+      }
+
+      final DateTime approvedAt = DateTime.now();
+      await _setQuantity(
+        txn,
+        warehouseId: pending.warehouseId,
+        itemId: pending.itemId,
+        newQuantity: current - pending.quantity,
+        updatedAt: approvedAt,
+      );
+      await txn.update(
+        DatabaseTables.transactions,
+        <String, Object?>{
+          'status': TransactionStatus.approved,
+          'rejection_reason': null,
+        },
+        where: 'id = ?',
+        whereArgs: <Object?>[transactionId],
+      );
+
+      return pending.copyWith(status: TransactionStatus.approved);
+    });
+  }
+
+  /// يرفض طلبًا معلقًا ويسجّل سبب الرفض دون أي مساس بالرصيد.
+  Future<TransactionModel> rejectPendingTransaction(
+    int transactionId,
+    String reason,
+  ) async {
+    final String rejectionReason = reason.trim();
+    if (rejectionReason.isEmpty) {
+      throw ArgumentError('سبب الرفض مطلوب.');
+    }
+
+    final Database db = await _helper.database;
+
+    return db.transaction<TransactionModel>((Transaction txn) async {
+      final TransactionModel pending = await _requirePending(
+        txn,
+        transactionId,
+      );
+
+      await txn.update(
+        DatabaseTables.transactions,
+        <String, Object?>{
+          'status': TransactionStatus.rejected,
+          'rejection_reason': rejectionReason,
+        },
+        where: 'id = ?',
+        whereArgs: <Object?>[transactionId],
+      );
+
+      return pending.copyWith(
+        status: TransactionStatus.rejected,
+        rejectionReason: rejectionReason,
+      );
+    });
+  }
+
+  /// كل السندات المعلقة (الأحدث أولًا)، مع إمكانية حصرها بمخزن واحد.
+  Future<List<TransactionModel>> getPendingTransactions({
+    int? warehouseId,
+  }) async {
+    final Database db = await _helper.database;
+    final List<String> conditions = <String>['status = ?'];
+    final List<Object?> args = <Object?>[TransactionStatus.pending];
+    if (warehouseId != null) {
+      conditions.add('warehouse_id = ?');
+      args.add(warehouseId);
+    }
+
+    final List<Map<String, Object?>> rows = await db.query(
+      DatabaseTables.transactions,
+      where: conditions.join(' AND '),
+      whereArgs: args,
+      orderBy: 'created_at DESC, id DESC',
+    );
+    return rows.map(TransactionModel.fromMap).toList(growable: false);
+  }
+
+  /// عدد الطلبات المعلقة (للعرض في لوحة التحكم).
+  Future<int> countPendingTransactions({int? warehouseId}) async {
+    final Database db = await _helper.database;
+    final List<Map<String, Object?>> rows = await db.rawQuery(
+      '''
+      SELECT COUNT(*) AS total
+      FROM ${DatabaseTables.transactions}
+      WHERE status = ?${warehouseId == null ? '' : ' AND warehouse_id = ?'}
+    ''',
+      <Object?>[
+        TransactionStatus.pending,
+        if (warehouseId != null) warehouseId,
+      ],
+    );
+    return (rows.first['total'] as num?)?.toInt() ?? 0;
+  }
+
+  /// يُدرج سندًا بحالة معلقة دون لمس الأرصدة.
+  Future<TransactionModel> _insertPendingRequest({
+    required String transactionType,
+    required int warehouseId,
+    required int itemId,
+    required int quantity,
+    required String partyName,
+    required String reason,
+    required DateTime timestamp,
+    String? orderReference,
+    String? vehicleNumber,
+    String? notes,
+  }) async {
+    final Database db = await _helper.database;
+
+    return db.transaction<TransactionModel>((Transaction txn) async {
+      final String voucherNumber = await _nextVoucherNumber(
+        txn,
+        transactionType,
+        timestamp,
+      );
+
+      final TransactionModel request = TransactionModel(
+        transactionType: transactionType,
+        voucherNumber: voucherNumber,
+        warehouseId: warehouseId,
+        itemId: itemId,
+        quantity: quantity,
+        partyName: partyName,
+        orderReference: orderReference,
+        vehicleNumber: vehicleNumber,
+        reason: reason,
+        notes: notes,
+        status: TransactionStatus.pending,
+        createdAt: timestamp,
+      );
+
+      final int id = await txn.insert(
+        DatabaseTables.transactions,
+        request.toMap(),
+      );
+      return request.copyWith(id: id);
+    });
+  }
+
+  /// يجلب سندًا معلقًا أو يرمي خطأً عربيًا واضحًا.
+  Future<TransactionModel> _requirePending(
+    DatabaseExecutor executor,
+    int transactionId,
+  ) async {
+    final List<Map<String, Object?>> rows = await executor.query(
+      DatabaseTables.transactions,
+      where: 'id = ?',
+      whereArgs: <Object?>[transactionId],
+      limit: 1,
+    );
+    if (rows.isEmpty) {
+      throw ArgumentError('السند المطلوب غير موجود.');
+    }
+
+    final TransactionModel transaction = TransactionModel.fromMap(rows.first);
+    if (transaction.status != TransactionStatus.pending) {
+      throw ArgumentError(
+        'لا يمكن تنفيذ العملية: السند حالته '
+        '"${TransactionStatus.label(transaction.status)}".',
+      );
+    }
+    return transaction;
+  }
+
+  // ---------------------------------------------------------------------------
   // الجرد والتسوية (ADJUSTMENT)
   // ---------------------------------------------------------------------------
 
@@ -537,6 +807,11 @@ class TransactionRepository {
   // ---------------------------------------------------------------------------
   // أدوات داخلية
   // ---------------------------------------------------------------------------
+
+  String? _cleanOptional(String? value) {
+    final String? trimmed = value?.trim();
+    return (trimmed == null || trimmed.isEmpty) ? null : trimmed;
+  }
 
   void _validatePositiveQuantity(int quantity) {
     if (quantity <= 0) {
