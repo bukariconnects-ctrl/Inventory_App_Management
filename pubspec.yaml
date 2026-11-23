@@ -93,6 +93,8 @@ flutter:
   # خط عربي محلي لضمان توليد سندات PDF بالعربية دون إنترنت.
   assets:
     - assets/fonts/Cairo-Regular.ttf
+    # شعار مصنع رواء الرسمي (ترويسة السندات والعلامة المائية).
+    - assets/images/rawaa_logo.png
 
   # To add assets to your application, add an assets section, like this:
   # assets:
