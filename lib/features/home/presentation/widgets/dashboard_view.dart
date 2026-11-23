@@ -7,6 +7,7 @@ import '../../../../core/utils/app_formatters.dart';
 import '../../../../core/widgets/stock_status_badge.dart';
 import '../../../inventory/data/models/stock_balance_status.dart';
 import '../../../inventory/presentation/providers/inventory_provider.dart';
+import '../../../reports/presentation/screens/daily_journal_screen.dart';
 import '../../../stakeholders/presentation/screens/stakeholders_screen.dart';
 import '../../../stocktake/presentation/screens/stocktake_screen.dart';
 import '../../../transactions/presentation/providers/transaction_provider.dart';
@@ -172,6 +173,17 @@ class DashboardView extends StatelessWidget {
             subtitle: 'بحث في السندات • إعادة الطباعة • إحصاءات الفترة',
             icon: Icons.receipt_long_rounded,
             onTap: onOpenArchive,
+          ),
+          const SizedBox(height: 12),
+          _SectionLink(
+            title: 'اليومية المخزنية الشاملة',
+            subtitle: 'ميزان اليوم • حركات الوردية • طباعة A4',
+            icon: Icons.today_rounded,
+            onTap: () => Navigator.of(context).push(
+              MaterialPageRoute<void>(
+                builder: (BuildContext context) => const DailyJournalScreen(),
+              ),
+            ),
           ),
           const SizedBox(height: 22),
           Row(

@@ -751,6 +751,144 @@ class TransactionRepository {
         .toList(growable: false);
   }
 
+  /// كشف مسحوبات مندوب محدد: كل سندات الصرف وبدل التالف **المعتمدة** خلال الفترة.
+  ///
+  /// تُحتسب الفترة بأيام كاملة: من 00:00 يوم [startDate] حتى نهاية يوم [endDate].
+  /// السندات المعلقة أو المرفوضة لا تظهر لأنها لم تُخصم من رصيد المخزن.
+  Future<RepresentativeLedger> getRepresentativeLedger({
+    required String representativeName,
+    required DateTime startDate,
+    required DateTime endDate,
+    int? warehouseId,
+  }) async {
+    final String name = representativeName.trim();
+    if (name.isEmpty) {
+      throw ArgumentError('اسم المندوب مطلوب لعرض كشف المسحوبات.');
+    }
+
+    final DateTime start = DateTime(
+      startDate.year,
+      startDate.month,
+      startDate.day,
+    );
+    final DateTime end = DateTime(
+      endDate.year,
+      endDate.month,
+      endDate.day,
+      23,
+      59,
+      59,
+      999,
+    );
+    if (end.isBefore(start)) {
+      throw ArgumentError('تاريخ نهاية الكشف يسبق تاريخ بدايته.');
+    }
+
+    final List<String> conditions = <String>[
+      'party_name = ?',
+      'status = ?',
+      'transaction_type IN (?, ?)',
+      'created_at >= ?',
+      'created_at <= ?',
+    ];
+    final List<Object?> args = <Object?>[
+      name,
+      TransactionStatus.approved,
+      TransactionTypes.outbound,
+      TransactionTypes.marketReplacement,
+      start.toIso8601String(),
+      end.toIso8601String(),
+    ];
+    if (warehouseId != null) {
+      conditions.add('warehouse_id = ?');
+      args.add(warehouseId);
+    }
+
+    final Database db = await _helper.database;
+    final List<Map<String, Object?>> rows = await db.query(
+      DatabaseTables.transactions,
+      where: conditions.join(' AND '),
+      whereArgs: args,
+      orderBy: 'created_at ASC, id ASC',
+    );
+
+    return RepresentativeLedger(
+      representativeName: name,
+      startDate: start,
+      endDate: DateTime(endDate.year, endDate.month, endDate.day),
+      transactions: rows.map(TransactionModel.fromMap).toList(growable: false),
+      warehouseId: warehouseId,
+    );
+  }
+
+  /// اليومية المخزنية الشاملة ليوم واحد (كل المخازن أو مخزن محدد).
+  ///
+  /// تعتمد فقط على الحركات **المعتمدة** لأنها وحدها تغيّر الأرصدة:
+  /// الاستلام، الصرف، بدل التالف المعتمد، الإتلاف المعتمد، وتسويات الجرد.
+  /// يُحسب إغلاق اليوم من الرصيد الحالي مطروحاً منه حركة ما بعده، ثم يُشتق
+  /// رصيد البداية من الإغلاق مطروحاً منه صافي حركة اليوم.
+  Future<DailyJournalReport> getDailyJournalReport({
+    required DateTime date,
+    int? warehouseId,
+  }) async {
+    final DateTime start = DateTime(date.year, date.month, date.day);
+    final DateTime end = DateTime(
+      date.year,
+      date.month,
+      date.day,
+      23,
+      59,
+      59,
+      999,
+    );
+
+    final List<String> conditions = <String>[
+      'status = ?',
+      'created_at >= ?',
+      'created_at <= ?',
+    ];
+    final List<Object?> args = <Object?>[
+      TransactionStatus.approved,
+      start.toIso8601String(),
+      end.toIso8601String(),
+    ];
+    if (warehouseId != null) {
+      conditions.add('warehouse_id = ?');
+      args.add(warehouseId);
+    }
+
+    final Database db = await _helper.database;
+    final List<Map<String, Object?>> rows = await db.query(
+      DatabaseTables.transactions,
+      where: conditions.join(' AND '),
+      whereArgs: args,
+      orderBy: 'created_at ASC, id ASC',
+    );
+    final List<TransactionModel> transactions = rows
+        .map(TransactionModel.fromMap)
+        .toList(growable: false);
+
+    final int currentBalance = await _totalQuantity(db, warehouseId);
+    final int netAfter = await _netQuantity(
+      db,
+      warehouseId: warehouseId,
+      after: end,
+    );
+    final int netToday = transactions.fold<int>(
+      0,
+      (int sum, TransactionModel t) => sum + _signedQuantity(t),
+    );
+    final int closingBalance = currentBalance - netAfter;
+
+    return DailyJournalReport(
+      date: start,
+      warehouseId: warehouseId,
+      transactions: transactions,
+      openingBalance: closingBalance - netToday,
+      closingBalance: closingBalance,
+    );
+  }
+
   /// يبني شروط الاستعلام وقيمه معًا لتجنّب تكرار الكود أو حقن SQL.
   _QueryFilter _buildFilter({
     int? warehouseId,
@@ -821,6 +959,58 @@ class TransactionRepository {
         'الكمية يجب أن تكون أكبر من صفر.',
       );
     }
+  }
+
+  /// مجموع أرصدة كل الأصناف في المخزن المحدد أو في كل المخازن.
+  Future<int> _totalQuantity(
+    DatabaseExecutor executor,
+    int? warehouseId,
+  ) async {
+    final List<Map<String, Object?>> rows = await executor.rawQuery('''
+      SELECT COALESCE(SUM(current_quantity), 0) AS total
+      FROM ${DatabaseTables.stockBalances}
+      ${warehouseId == null ? '' : 'WHERE warehouse_id = ?'}
+    ''', warehouseId == null ? null : <Object?>[warehouseId]);
+    return (rows.first['total'] as num?)?.toInt() ?? 0;
+  }
+
+  /// صافي الحركة المؤثرة على الرصيد بعد لحظة محددة (الحركات المعتمدة فقط).
+  Future<int> _netQuantity(
+    DatabaseExecutor executor, {
+    required DateTime after,
+    int? warehouseId,
+  }) async {
+    final List<Map<String, Object?>> rows = await executor.rawQuery(
+      '''
+      SELECT COALESCE(SUM(
+        CASE
+          WHEN transaction_type IN ('${TransactionTypes.inbound}',
+                                    '${TransactionTypes.adjustment}')
+            THEN quantity
+          ELSE -ABS(quantity)
+        END
+      ), 0) AS net
+      FROM ${DatabaseTables.transactions}
+      WHERE status = ?
+        AND created_at > ?
+        ${warehouseId == null ? '' : 'AND warehouse_id = ?'}
+    ''',
+      <Object?>[
+        TransactionStatus.approved,
+        after.toIso8601String(),
+        if (warehouseId != null) warehouseId,
+      ],
+    );
+    return (rows.first['net'] as num?)?.toInt() ?? 0;
+  }
+
+  /// أثر الحركة على الرصيد: موجب للاستلام والتسوية، سالب للصرف والتالف.
+  int _signedQuantity(TransactionModel transaction) {
+    if (transaction.transactionType == TransactionTypes.inbound ||
+        transaction.transactionType == TransactionTypes.adjustment) {
+      return transaction.quantity;
+    }
+    return -transaction.quantity.abs();
   }
 
   /// الرصيد الحالي، أو صفر إذا لم يكن للصنف سجل رصيد في هذا المخزن بعد.

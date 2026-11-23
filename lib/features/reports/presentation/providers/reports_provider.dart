@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 
+import '../../../../core/utils/app_formatters.dart';
 import '../../../transactions/data/models/transaction_model.dart';
 import '../../../transactions/data/transaction_repository.dart';
 import '../../../transactions/presentation/providers/transaction_provider.dart';
@@ -33,6 +34,18 @@ class ReportsProvider extends ChangeNotifier {
   String? _errorMessage;
   int _requestId = 0;
 
+  RepresentativeLedger? _distributorLedger;
+  String? _selectedDistributor;
+  bool _isLoadingDistributor = false;
+  String? _distributorError;
+  int _distributorRequestId = 0;
+
+  DateTime _selectedJournalDate = DateTime.now();
+  DailyJournalReport? _dailyJournalData;
+  bool _isLoadingJournal = false;
+  String? _journalError;
+  int _journalRequestId = 0;
+
   // ---------------------------------------------------------------------------
   // الحالة المقروءة
   // ---------------------------------------------------------------------------
@@ -55,6 +68,48 @@ class ReportsProvider extends ChangeNotifier {
 
   bool get isLoading => _isLoading;
   String? get errorMessage => _errorMessage;
+
+  // ---------------------------------------------------------------------------
+  // حالة كشف مسحوبات المندوب
+  // ---------------------------------------------------------------------------
+
+  /// اسم المندوب المحدد في الكشف.
+  String? get selectedDistributor => _selectedDistributor;
+
+  /// كشف المسحوبات الأخير (أو `null` قبل أول تحميل).
+  RepresentativeLedger? get distributorLedger => _distributorLedger;
+
+  /// سندات الكشف مرتبة زمنياً (فارغة قبل التحميل).
+  List<TransactionModel> get distributorLedgerTransactions =>
+      List<TransactionModel>.unmodifiable(
+        _distributorLedger?.transactions ?? const <TransactionModel>[],
+      );
+
+  /// إجمالي الكراتين المسحوبة للمندوب.
+  int get distributorTotalCartons => _distributorLedger?.totalCartons ?? 0;
+
+  /// إجمالي العبوات المسحوبة للمندوب (20 عبوة في الكرتون).
+  int get distributorTotalBottles =>
+      AppFormatters.bottlesCount(distributorTotalCartons);
+
+  /// عدد سندات الكشف.
+  int get distributorVoucherCount => _distributorLedger?.voucherCount ?? 0;
+
+  bool get isLoadingDistributor => _isLoadingDistributor;
+  String? get distributorError => _distributorError;
+
+  // ---------------------------------------------------------------------------
+  // حالة اليومية المخزنية
+  // ---------------------------------------------------------------------------
+
+  /// اليوم المحدد في اليومية (افتراضياً اليوم).
+  DateTime get selectedJournalDate => _selectedJournalDate;
+
+  /// بيانات اليومية الأخيرة (أو `null` قبل أول تحميل).
+  DailyJournalReport? get dailyJournalData => _dailyJournalData;
+
+  bool get isLoadingJournal => _isLoadingJournal;
+  String? get journalError => _journalError;
 
   /// هل هناك أي فلتر مطبّق غير «الكل»؟
   bool get hasActiveFilters =>
@@ -228,4 +283,92 @@ class ReportsProvider extends ChangeNotifier {
 
   /// تحديث سريع دون شاشة تحميل كاملة.
   Future<void> refresh() => loadReportsData(showLoader: false);
+
+  // ---------------------------------------------------------------------------
+  // كشف مسحوبات المندوب
+  // ---------------------------------------------------------------------------
+
+  /// يحمّل كشف مسحوبات مندوب محدد.
+  ///
+  /// عند غياب [start] و[end] يُستخدم اليوم الحالي كفترة افتراضية.
+  Future<void> loadRepresentativeLedger(
+    String distributorName, {
+    DateTime? start,
+    DateTime? end,
+    int? warehouseId,
+  }) async {
+    final DateTime today = DateTime.now();
+    final DateTime from = start ?? DateTime(today.year, today.month, today.day);
+    final DateTime to = end ?? from;
+
+    _selectedDistributor = distributorName.trim();
+    final int requestId = ++_distributorRequestId;
+    _isLoadingDistributor = true;
+    _distributorError = null;
+    notifyListeners();
+
+    try {
+      final RepresentativeLedger ledger = await _repository
+          .getRepresentativeLedger(
+            representativeName: distributorName,
+            startDate: from,
+            endDate: to,
+            warehouseId: warehouseId,
+          );
+      if (requestId != _distributorRequestId) {
+        return;
+      }
+      _distributorLedger = ledger;
+      _distributorError = null;
+    } catch (error) {
+      if (requestId != _distributorRequestId) {
+        return;
+      }
+      debugPrint('ReportsProvider.loadRepresentativeLedger: $error');
+      _distributorLedger = null;
+      _distributorError = 'تعذر تحميل كشف مسحوبات المندوب. حاول مرة أخرى.';
+    } finally {
+      if (requestId == _distributorRequestId) {
+        _isLoadingDistributor = false;
+        notifyListeners();
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // اليومية المخزنية
+  // ---------------------------------------------------------------------------
+
+  /// يحمّل اليومية المخزنية ليوم محدد.
+  Future<void> loadDailyJournal(DateTime date, {int? warehouseId}) async {
+    _selectedJournalDate = DateTime(date.year, date.month, date.day);
+    final int requestId = ++_journalRequestId;
+    _isLoadingJournal = true;
+    _journalError = null;
+    notifyListeners();
+
+    try {
+      final DailyJournalReport report = await _repository.getDailyJournalReport(
+        date: date,
+        warehouseId: warehouseId,
+      );
+      if (requestId != _journalRequestId) {
+        return;
+      }
+      _dailyJournalData = report;
+      _journalError = null;
+    } catch (error) {
+      if (requestId != _journalRequestId) {
+        return;
+      }
+      debugPrint('ReportsProvider.loadDailyJournal: $error');
+      _dailyJournalData = null;
+      _journalError = 'تعذر تحميل اليومية المخزنية. حاول مرة أخرى.';
+    } finally {
+      if (requestId == _journalRequestId) {
+        _isLoadingJournal = false;
+        notifyListeners();
+      }
+    }
+  }
 }

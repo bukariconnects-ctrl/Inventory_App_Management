@@ -12,6 +12,8 @@ import '../../../warehouses/data/models/warehouse_model.dart';
 import '../../../warehouses/presentation/providers/warehouse_provider.dart';
 import '../../data/models/report_models.dart';
 import '../providers/reports_provider.dart';
+import 'daily_journal_screen.dart';
+import 'representative_ledger_screen.dart';
 
 /// التقارير والإحصائيات: مقاييس الفترة، مسحوبات المناديب، وتصدير تقرير PDF.
 class ReportsScreen extends StatefulWidget {
@@ -158,6 +160,47 @@ class _ReportsScreenState extends State<ReportsScreen> {
             totalOutbound: provider.metrics.totalOutbound,
           ),
           const SizedBox(height: 20),
+          const Text(
+            'تقارير رقابية متقدمة',
+            style: TextStyle(fontSize: 14.5, fontWeight: FontWeight.w700),
+          ),
+          const SizedBox(height: 8),
+          Row(
+            children: <Widget>[
+              Expanded(
+                child: _ReportShortcutCard(
+                  key: const Key('reports_open_distributor_ledger'),
+                  title: 'كشف مسحوبات مندوب',
+                  subtitle: 'مطابقة سندات الصرف وبدل التالف',
+                  icon: Icons.person_search_rounded,
+                  color: AppColors.primaryDark,
+                  onTap: () => Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (BuildContext context) =>
+                          const RepresentativeLedgerScreen(),
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: _ReportShortcutCard(
+                  key: const Key('reports_open_daily_journal'),
+                  title: 'اليومية المخزنية',
+                  subtitle: 'ميزان اليوم وكل حركاته',
+                  icon: Icons.today_rounded,
+                  color: AppColors.primary,
+                  onTap: () => Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (BuildContext context) =>
+                          const DailyJournalScreen(),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 20),
           ElevatedButton.icon(
             key: const Key('reports_export_pdf_button'),
             onPressed: () => _exportReport(provider),
@@ -193,6 +236,77 @@ class _ReportsScreenState extends State<ReportsScreen> {
         backgroundColor: AppColors.surface,
         side: BorderSide(
           color: selected ? AppColors.primary : AppColors.outline,
+        ),
+      ),
+    );
+  }
+}
+
+class _ReportShortcutCard extends StatelessWidget {
+  const _ReportShortcutCard({
+    super.key,
+    required this.title,
+    required this.subtitle,
+    required this.icon,
+    required this.color,
+    required this.onTap,
+  });
+
+  final String title;
+  final String subtitle;
+  final IconData icon;
+  final Color color;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: AppColors.surface,
+      borderRadius: BorderRadius.circular(16),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(16),
+        child: Container(
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: AppColors.divider),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              Container(
+                width: 34,
+                height: 34,
+                decoration: BoxDecoration(
+                  color: color.withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Icon(icon, size: 18, color: color),
+              ),
+              const SizedBox(height: 10),
+              Text(
+                title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontSize: 12.5,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+              const SizedBox(height: 3),
+              Text(
+                subtitle,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontSize: 10.5,
+                  color: AppColors.textSecondary,
+                  height: 1.4,
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );

@@ -421,6 +421,432 @@ class PdfService {
     return document.save();
   }
 
+  /// يبني كشف مسحوبات موزّع/مندوب رسميًا بمقاس A4.
+  ///
+  /// يتضمن بطاقة تعريف المندوب، فترة الكشف، جدول السندات المسحوبة
+  /// (صرف عادي + بدل تالف معتمد)، صندوق الإجماليات، وخانات التواقيع الثلاث.
+  Future<Uint8List> generateRepresentativeStatementPdf({
+    required RepresentativeLedger ledger,
+    required ItemModel item,
+    required DateTime generatedAt,
+    String? storekeeperName,
+    String? representativePhone,
+    String? representativeVehicle,
+    WarehouseModel? warehouse,
+    Map<int, String> warehouseNames = const <int, String>{},
+  }) async {
+    final _PdfFonts fonts = await _resolveFonts();
+    final String keeperName = await _resolveStorekeeperName(storekeeperName);
+    await _ensureLogo();
+
+    final String reference = representativeStatementReference(generatedAt);
+    final int perCarton = _bottlesPerCarton(item);
+    final String periodLabel =
+        '${AppFormatters.date(ledger.startDate)} إلى '
+        '${AppFormatters.date(ledger.endDate)}';
+    final String scopeLabel = warehouse?.name ?? 'كل المخازن';
+    final String contact = _contactLine(
+      phone: representativePhone,
+      vehicle: representativeVehicle,
+    );
+
+    final List<List<String>> rows = <List<String>>[
+      for (final TransactionModel transaction in ledger.transactions)
+        <String>[
+          _shortDateTime(transaction.createdAt),
+          transaction.voucherNumber,
+          warehouseNames[transaction.warehouseId] ??
+              'مخزن #${transaction.warehouseId}',
+          _typeLabel(transaction.transactionType),
+          _hasText(transaction.orderReference)
+              ? transaction.orderReference!.trim()
+              : '—',
+          AppFormatters.number(transaction.quantity.abs()),
+          AppFormatters.number(transaction.quantity.abs() * perCarton),
+        ],
+    ];
+
+    final pw.Document document = pw.Document(
+      title: 'كشف مسحوبات ${ledger.representativeName} - $reference',
+      author: AppConstants.appTitle,
+      creator: AppConstants.appTitle,
+      subject: 'كشف مسحوبات موزع/مندوب - مصنع رواء',
+    );
+
+    document.addPage(
+      pw.MultiPage(
+        pageTheme: _pageTheme(
+          fonts: fonts,
+          format: reportPageFormat,
+          margin: _reportMargin,
+          pending: false,
+        ),
+        footer: _footer,
+        build: (pw.Context context) => _rtl(<pw.Widget>[
+          buildOfficialLetterhead(
+            title: 'كشف مسحوبات موزع / مندوب',
+            voucherNumber: reference,
+            accent: _pdfPrimaryDark,
+          ),
+          pw.SizedBox(height: 12),
+          pw.Row(
+            children: <pw.Widget>[
+              pw.Expanded(
+                child: _metaBox(
+                  label: 'المندوب / الموزّع',
+                  value: ledger.representativeName,
+                  sub: contact,
+                ),
+              ),
+              pw.SizedBox(width: 10),
+              pw.Expanded(
+                child: _metaBox(
+                  label: 'فترة الكشف',
+                  value: periodLabel,
+                  sub: 'النطاق: $scopeLabel',
+                ),
+              ),
+            ],
+          ),
+          pw.SizedBox(height: 8),
+          pw.Row(
+            children: <pw.Widget>[
+              pw.Expanded(
+                child: _metaBox(
+                  label: 'تاريخ إصدار الكشف',
+                  value: AppFormatters.dateTime(generatedAt),
+                  sub: 'عدد السندات: ${ledger.voucherCount}',
+                ),
+              ),
+              pw.SizedBox(width: 10),
+              pw.Expanded(
+                child: _metaBox(
+                  label: 'سعة الكرتون',
+                  value: '$perCarton قنينة × ${_bottleVolume(item)} مل',
+                  sub: 'الصنف: ${item.name}',
+                ),
+              ),
+            ],
+          ),
+          pw.SizedBox(height: 14),
+          pw.Row(
+            children: <pw.Widget>[
+              pw.Expanded(
+                child: _totalTile(
+                  label: 'إجمالي الكراتين المنصرفة',
+                  value: AppFormatters.number(ledger.totalCartons),
+                  unit: AppConstants.cartonUnit,
+                  accent: _pdfPrimaryDark,
+                  soft: PdfColor.fromHex('#E9F0FA'),
+                ),
+              ),
+              pw.SizedBox(width: 10),
+              pw.Expanded(
+                child: _totalTile(
+                  label: 'إجمالي العبوات',
+                  value: AppFormatters.number(ledger.totalCartons * perCarton),
+                  unit: 'عبوة',
+                  accent: _pdfPrimary,
+                  soft: PdfColor.fromHex('#E7F4FB'),
+                ),
+              ),
+              pw.SizedBox(width: 10),
+              pw.Expanded(
+                child: _totalTile(
+                  label: 'عدد السندات',
+                  value: AppFormatters.number(ledger.voucherCount),
+                  unit: 'سند',
+                  accent: _pdfPrimaryDark,
+                  soft: _pdfSoft,
+                ),
+              ),
+            ],
+          ),
+          pw.SizedBox(height: 14),
+          _sectionTitle('تفاصيل السندات المسحوبة'),
+          pw.SizedBox(height: 6),
+          if (rows.isEmpty)
+            _notesBox(
+              'لا توجد سندات صرف أو بدل تالف معتمدة لهذا المندوب داخل الفترة '
+              'المحددة.',
+            )
+          else
+            ..._tableBlocks(
+              headers: <String>[
+                'التاريخ والوقت',
+                'رقم السند',
+                'المخزن',
+                'نوع السند',
+                'أمر الصرف',
+                'كراتين',
+                'عبوات',
+              ],
+              rows: rows,
+              widths: <double>[62, 88, 90, 82, 74, 44, 50],
+              accent: _pdfPrimaryDark,
+            ),
+          pw.SizedBox(height: 8),
+          _notesBox(
+            'صافي المسحوبات: '
+            '${AppFormatters.formatQuantityWithBottles(ledger.totalCartons, bottlesPerCarton: perCarton)}'
+            '  |  سندات الصرف: ${ledger.outboundCount}'
+            '  |  سندات بدل التالف: ${ledger.replacementCount}',
+          ),
+          pw.SizedBox(height: 16),
+          _sectionTitle('التوقيعات والاعتماد'),
+          pw.SizedBox(height: 6),
+          pw.Row(
+            crossAxisAlignment: pw.CrossAxisAlignment.start,
+            children: <pw.Widget>[
+              pw.Expanded(
+                child: _signatureBox(
+                  title: storekeeperSignatureTitle(keeperName),
+                  extra: 'المسؤول عن المخزن والعهدة',
+                  accent: _pdfPrimaryDark,
+                ),
+              ),
+              pw.SizedBox(width: 8),
+              pw.Expanded(
+                child: _signatureBox(
+                  title: 'المندوب / الموزّع (للمطابقة)',
+                  subtitle: ledger.representativeName,
+                  extra: _hasText(representativeVehicle)
+                      ? 'رقم اللوحة: ${representativeVehicle!.trim()}'
+                      : contact,
+                  accent: _pdfPrimaryDark,
+                ),
+              ),
+            ],
+          ),
+          pw.SizedBox(height: 6),
+          _approvalBox(orderReference: reference, accent: _pdfPrimaryDark),
+        ]),
+      ),
+    );
+
+    return document.save();
+  }
+
+  /// يبني اليومية المخزنية الشاملة ليوم واحد بمقاس A4.
+  ///
+  /// تعرض ميزان اليوم (بداية، وارد، منصرف، تالف وبدل، نهاية) ثم جدول كل
+  /// الحركات المنفذة مرتبة زمنيًا، وتُختم بتوقيع أمين المخزن واعتماد الإدارة.
+  Future<Uint8List> generateDailyJournalPdf({
+    required DailyJournalReport journal,
+    required ItemModel item,
+    required DateTime generatedAt,
+    String? storekeeperName,
+    WarehouseModel? warehouse,
+    Map<int, String> warehouseNames = const <int, String>{},
+  }) async {
+    final _PdfFonts fonts = await _resolveFonts();
+    final String keeperName = await _resolveStorekeeperName(storekeeperName);
+    await _ensureLogo();
+
+    final String reference = dailyJournalReference(journal.date);
+    final int perCarton = _bottlesPerCarton(item);
+    final String scopeLabel = warehouse?.name ?? 'كل المخازن';
+
+    final List<List<String>> rows = <List<String>>[
+      for (final TransactionModel transaction in journal.transactions)
+        <String>[
+          AppFormatters.time(transaction.createdAt),
+          transaction.voucherNumber,
+          _typeLabel(transaction.transactionType),
+          _hasText(transaction.partyName) ? transaction.partyName!.trim() : '—',
+          _hasText(transaction.orderReference)
+              ? transaction.orderReference!.trim()
+              : '—',
+          AppFormatters.number(transaction.quantity.abs()),
+          AppFormatters.number(transaction.quantity.abs() * perCarton),
+        ],
+    ];
+
+    final pw.Document document = pw.Document(
+      title: 'اليومية المخزنية - $reference',
+      author: AppConstants.appTitle,
+      creator: AppConstants.appTitle,
+      subject: 'اليومية المخزنية الشاملة - مصنع رواء',
+    );
+
+    document.addPage(
+      pw.MultiPage(
+        pageTheme: _pageTheme(
+          fonts: fonts,
+          format: reportPageFormat,
+          margin: _reportMargin,
+          pending: false,
+        ),
+        footer: _footer,
+        build: (pw.Context context) => _rtl(<pw.Widget>[
+          buildOfficialLetterhead(
+            title: 'اليومية المخزنية لحركة البضائع',
+            voucherNumber: reference,
+            accent: _pdfPrimary,
+          ),
+          pw.SizedBox(height: 12),
+          pw.Row(
+            children: <pw.Widget>[
+              pw.Expanded(
+                child: _metaBox(
+                  label: 'اليوم المخزني',
+                  value: AppFormatters.date(journal.date),
+                  sub:
+                      'عدد الحركات: ${AppFormatters.number(journal.voucherCount)}',
+                ),
+              ),
+              pw.SizedBox(width: 10),
+              pw.Expanded(
+                child: _metaBox(
+                  label: 'المخزن',
+                  value: scopeLabel,
+                  sub: 'الصنف: ${item.name}',
+                ),
+              ),
+            ],
+          ),
+          pw.SizedBox(height: 8),
+          pw.Row(
+            children: <pw.Widget>[
+              pw.Expanded(
+                child: _metaBox(
+                  label: 'أمين المخزن المسؤول',
+                  value: keeperName,
+                  sub:
+                      'سعة الكرتون: $perCarton قنينة × ${_bottleVolume(item)} مل',
+                ),
+              ),
+              pw.SizedBox(width: 10),
+              pw.Expanded(
+                child: _metaBox(
+                  label: 'تاريخ طباعة اليومية',
+                  value: AppFormatters.dateTime(generatedAt),
+                  sub:
+                      'صافي الحركة: '
+                      '${journal.netChange < 0 ? '−' : '+'}'
+                      '${AppFormatters.number(journal.netChange.abs())} '
+                      '${AppConstants.cartonUnit}',
+                ),
+              ),
+            ],
+          ),
+          pw.SizedBox(height: 14),
+          _sectionTitle('ميزان اليوم المخزني'),
+          pw.SizedBox(height: 8),
+          pw.Row(
+            children: <pw.Widget>[
+              pw.Expanded(
+                child: _totalTile(
+                  label: 'رصيد بداية اليوم',
+                  value: AppFormatters.number(journal.openingBalance),
+                  unit: AppConstants.cartonUnit,
+                  accent: _pdfPrimaryDark,
+                  soft: _pdfSoft,
+                ),
+              ),
+              pw.SizedBox(width: 10),
+              pw.Expanded(
+                child: _totalTile(
+                  label: 'إجمالي الوارد',
+                  value: AppFormatters.number(journal.inboundCartons),
+                  unit: AppConstants.cartonUnit,
+                  accent: _pdfPrimary,
+                  soft: PdfColor.fromHex('#E7F4FB'),
+                ),
+              ),
+              pw.SizedBox(width: 10),
+              pw.Expanded(
+                child: _totalTile(
+                  label: 'إجمالي المنصرف',
+                  value: AppFormatters.number(journal.outboundCartons),
+                  unit: AppConstants.cartonUnit,
+                  accent: _pdfPrimaryDark,
+                  soft: PdfColor.fromHex('#E9F0FA'),
+                ),
+              ),
+            ],
+          ),
+          pw.SizedBox(height: 10),
+          pw.Row(
+            children: <pw.Widget>[
+              pw.Expanded(
+                child: _totalTile(
+                  label: 'التالف والبدل',
+                  value: AppFormatters.number(
+                    journal.damagedAndReplacementCartons,
+                  ),
+                  unit: AppConstants.cartonUnit,
+                  accent: _pdfDanger,
+                  soft: PdfColor.fromHex('#FBECEC'),
+                ),
+              ),
+              pw.SizedBox(width: 10),
+              pw.Expanded(
+                child: _totalTile(
+                  label: 'تسويات الجرد',
+                  value:
+                      '${journal.adjustmentCartons < 0 ? '−' : '+'}'
+                      '${AppFormatters.number(journal.adjustmentCartons.abs())}',
+                  unit: AppConstants.cartonUnit,
+                  accent: _pdfWarning,
+                  soft: PdfColor.fromHex('#FFF6E3'),
+                ),
+              ),
+              pw.SizedBox(width: 10),
+              pw.Expanded(
+                child: _totalTile(
+                  label: 'رصيد نهاية اليوم',
+                  value: AppFormatters.number(journal.closingBalance),
+                  unit: AppConstants.cartonUnit,
+                  accent: _pdfPrimaryDark,
+                  soft: PdfColor.fromHex('#EFF7FD'),
+                ),
+              ),
+            ],
+          ),
+          pw.SizedBox(height: 8),
+          _notesBox(
+            'المعادلة: بداية اليوم + الوارد − المنصرف − التالف والبدل '
+            '+ التسويات = رصيد نهاية اليوم.',
+          ),
+          pw.SizedBox(height: 14),
+          _sectionTitle('تفاصيل الحركات المنفذة خلال اليوم'),
+          pw.SizedBox(height: 6),
+          if (rows.isEmpty)
+            _notesBox('لا توجد حركات معتمدة مسجلة في هذا اليوم.')
+          else
+            ..._tableBlocks(
+              headers: <String>[
+                'الوقت',
+                'رقم السند',
+                'النوع',
+                'السائق / المندوب',
+                'أمر الصرف',
+                'كراتين',
+                'عبوات',
+              ],
+              rows: rows,
+              widths: <double>[46, 86, 72, 104, 78, 44, 50],
+              accent: _pdfPrimary,
+            ),
+          pw.SizedBox(height: 14),
+          _sectionTitle('التوقيعات والاعتماد'),
+          pw.SizedBox(height: 6),
+          _signaturesSection(
+            storekeeperName: keeperName,
+            partyTitle: 'إدارة المخازن',
+            partyName: 'إدارة المخازن / المشرف',
+            partyMeta: 'اليوم: ${AppFormatters.date(journal.date)}',
+            orderReference: reference,
+            accent: _pdfPrimaryDark,
+          ),
+        ]),
+      ),
+    );
+
+    return document.save();
+  }
+
   /// اسم ملف PDF آمن للسند، مثال: `ISS-20261113-001.pdf`.
   static String fileNameForVoucher(String voucherNumber) {
     final String sanitized = voucherNumber.trim().replaceAll(
@@ -449,6 +875,27 @@ class PdfService {
   /// اسم ملف تقرير المخزون العام.
   static String fileNameForSummaryReport(DateTime generatedAt) =>
       'INV-REPORT-${summaryReportReference(generatedAt).substring(4)}.pdf';
+
+  /// مرجع كشف مسحوبات المندوب، مثال: `RST-20261123-1030`.
+  static String representativeStatementReference(DateTime generatedAt) {
+    final String day =
+        '${generatedAt.year}${_pad(generatedAt.month)}${_pad(generatedAt.day)}';
+    final String time = '${_pad(generatedAt.hour)}${_pad(generatedAt.minute)}';
+    return 'RST-$day-$time';
+  }
+
+  /// اسم ملف كشف مسحوبات المندوب.
+  static String fileNameForRepresentativeStatement(DateTime generatedAt) =>
+      'REP-STATEMENT-'
+      '${representativeStatementReference(generatedAt).substring(4)}.pdf';
+
+  /// مرجع اليومية المخزنية، مثال: `DJ-20261123`.
+  static String dailyJournalReference(DateTime date) =>
+      'DJ-${date.year}${_pad(date.month)}${_pad(date.day)}';
+
+  /// اسم ملف اليومية المخزنية.
+  static String fileNameForDailyJournal(DateTime date) =>
+      'DAILY-JOURNAL-${date.year}${_pad(date.month)}${_pad(date.day)}.pdf';
 
   // ---------------------------------------------------------------------------
   // الترويسة الرسمية والعلامة المائية
@@ -1420,6 +1867,195 @@ class PdfService {
         ],
       ),
     );
+  }
+
+  // ---------------------------------------------------------------------------
+  // جداول التقارير الإدارية (A4)
+  // ---------------------------------------------------------------------------
+
+  /// يبني جدولاً مقسّماً إلى كتل صغيرة كي يتنقل بين صفحات A4 دون قصّ.
+  List<pw.Widget> _tableBlocks({
+    required List<String> headers,
+    required List<List<String>> rows,
+    required List<double> widths,
+    required PdfColor accent,
+    int rowsPerBlock = 14,
+  }) {
+    final List<pw.Widget> blocks = <pw.Widget>[];
+    for (int start = 0; start < rows.length; start += rowsPerBlock) {
+      final int end = start + rowsPerBlock > rows.length
+          ? rows.length
+          : start + rowsPerBlock;
+      blocks.add(
+        pw.Container(
+          decoration: pw.BoxDecoration(
+            border: pw.Border.all(color: _pdfOutline, width: 0.6),
+            borderRadius: pw.BorderRadius.circular(4),
+          ),
+          child: pw.Column(
+            children: <pw.Widget>[
+              _tableHeaderRow(headers: headers, widths: widths, accent: accent),
+              for (int index = start; index < end; index++)
+                _tableDataRow(
+                  cells: rows[index],
+                  widths: widths,
+                  striped: (index - start).isOdd,
+                ),
+            ],
+          ),
+        ),
+      );
+      blocks.add(pw.SizedBox(height: 5));
+    }
+    return blocks;
+  }
+
+  pw.Widget _tableHeaderRow({
+    required List<String> headers,
+    required List<double> widths,
+    required PdfColor accent,
+  }) {
+    return pw.Container(
+      padding: const pw.EdgeInsets.symmetric(horizontal: 5, vertical: 5),
+      decoration: pw.BoxDecoration(
+        color: _pdfSoft,
+        border: pw.Border(
+          bottom: pw.BorderSide(color: _pdfOutline, width: 0.6),
+        ),
+      ),
+      child: pw.Row(
+        children: <pw.Widget>[
+          for (int index = 0; index < headers.length; index++)
+            pw.SizedBox(
+              width: widths[index],
+              child: pw.Text(
+                headers[index],
+                textAlign: pw.TextAlign.center,
+                textDirection: pw.TextDirection.rtl,
+                style: pw.TextStyle(
+                  color: accent,
+                  fontSize: 7.4,
+                  fontWeight: pw.FontWeight.bold,
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  pw.Widget _tableDataRow({
+    required List<String> cells,
+    required List<double> widths,
+    required bool striped,
+  }) {
+    return pw.Container(
+      padding: const pw.EdgeInsets.symmetric(horizontal: 5, vertical: 3.4),
+      decoration: pw.BoxDecoration(
+        color: striped ? PdfColor.fromHex('#FAFCFE') : null,
+        border: pw.Border(
+          bottom: pw.BorderSide(color: _pdfOutline, width: 0.4),
+        ),
+      ),
+      child: pw.Row(
+        children: <pw.Widget>[
+          for (int index = 0; index < cells.length; index++)
+            pw.SizedBox(
+              width: widths[index],
+              child: pw.Text(
+                cells[index],
+                maxLines: 1,
+                overflow: pw.TextOverflow.clip,
+                textAlign: index < 2 ? pw.TextAlign.right : pw.TextAlign.center,
+                textDirection: pw.TextDirection.rtl,
+                style: pw.TextStyle(color: _pdfText, fontSize: 7.2),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  /// بطاقة رقم إجمالي في التقارير الإدارية.
+  pw.Widget _totalTile({
+    required String label,
+    required String value,
+    required String unit,
+    required PdfColor accent,
+    required PdfColor soft,
+  }) {
+    return pw.Container(
+      padding: const pw.EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      decoration: pw.BoxDecoration(
+        color: soft,
+        borderRadius: pw.BorderRadius.circular(5),
+        border: pw.Border.all(color: accent, width: 0.7),
+      ),
+      child: pw.Column(
+        crossAxisAlignment: pw.CrossAxisAlignment.start,
+        children: <pw.Widget>[
+          pw.Text(
+            label,
+            maxLines: 1,
+            textDirection: pw.TextDirection.rtl,
+            style: pw.TextStyle(color: _pdfMuted, fontSize: 8),
+          ),
+          pw.SizedBox(height: 4),
+          pw.Row(
+            crossAxisAlignment: pw.CrossAxisAlignment.end,
+            children: <pw.Widget>[
+              pw.Text(
+                value,
+                textDirection: pw.TextDirection.rtl,
+                style: pw.TextStyle(
+                  color: accent,
+                  fontSize: 16,
+                  fontWeight: pw.FontWeight.bold,
+                ),
+              ),
+              pw.SizedBox(width: 3),
+              pw.Text(
+                unit,
+                textDirection: pw.TextDirection.rtl,
+                style: pw.TextStyle(color: accent, fontSize: 8),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// تاريخ ووقت مختصر لجدول السندات: `13/11 09:30`.
+  static String _shortDateTime(DateTime value) =>
+      '${_pad(value.day)}/${_pad(value.month)} '
+      '${_pad(value.hour)}:${_pad(value.minute)}';
+
+  /// الاسم المختصر لنوع الحركة داخل جداول التقارير.
+  static String _typeLabel(String transactionType) {
+    switch (transactionType) {
+      case TransactionTypes.inbound:
+        return 'استلام';
+      case TransactionTypes.outbound:
+        return 'صرف عادي';
+      case TransactionTypes.marketReplacement:
+        return 'بدل تالف';
+      case TransactionTypes.damage:
+        return 'إتلاف';
+      case TransactionTypes.adjustment:
+        return 'تسوية جرد';
+      default:
+        return transactionType;
+    }
+  }
+
+  /// سطر بيانات المندوب المطبوع في بطاقة التعريف.
+  static String _contactLine({String? phone, String? vehicle}) {
+    final List<String> parts = <String>[
+      if (_hasText(phone)) 'هاتف: ${phone!.trim()}',
+      if (_hasText(vehicle)) 'اللوحة: ${vehicle!.trim()}',
+    ];
+    return parts.isEmpty ? 'بيانات الدليل غير مسجلة' : parts.join('  |  ');
   }
 
   // ---------------------------------------------------------------------------

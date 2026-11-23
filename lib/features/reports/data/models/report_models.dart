@@ -1,6 +1,8 @@
 /// نماذج مشتركة بين مستودع الحركات وشاشات السجل والتقارير.
 library;
 
+import '../../../transactions/data/models/transaction_model.dart';
+
 /// نطاق زمني مغلق (يشمل يوم النهاية كاملًا عند الاستعلام).
 class DateRange {
   const DateRange({required this.start, required this.end});
@@ -140,4 +142,156 @@ class RepresentativeSummary {
   String toString() =>
       'RepresentativeSummary($name, totalQuantity: $totalQuantity, '
       'voucherCount: $voucherCount)';
+}
+
+/// كشف مسحوبات مندوب/موزّع خلال فترة: كل سندات الصرف وبدل التالف المعتمدة.
+class RepresentativeLedger {
+  const RepresentativeLedger({
+    required this.representativeName,
+    required this.startDate,
+    required this.endDate,
+    required this.transactions,
+    this.warehouseId,
+  });
+
+  /// اسم المندوب كما هو محفوظ في السندات (`party_name`).
+  final String representativeName;
+
+  /// أول يوم في الكشف (00:00).
+  final DateTime startDate;
+
+  /// آخر يوم في الكشف (يُستعلم عنه بنهاية اليوم).
+  final DateTime endDate;
+
+  /// السندات المعتمدة مرتبة زمنيًا من الأقدم إلى الأحدث.
+  final List<TransactionModel> transactions;
+
+  /// المخزن المحدد في الكشف، أو `null` عند شمول كل المخازن.
+  final int? warehouseId;
+
+  /// إجمالي الكراتين المنصرفة (صرف عادي + بدل تالف).
+  int get totalCartons => transactions.fold<int>(
+    0,
+    (int sum, TransactionModel t) => sum + t.quantity.abs(),
+  );
+
+  /// عدد السندات المشمولة في الكشف.
+  int get voucherCount => transactions.length;
+
+  /// عدد سندات الصرف العادي.
+  int get outboundCount => transactions
+      .where(
+        (TransactionModel t) => t.transactionType == TransactionTypes.outbound,
+      )
+      .length;
+
+  /// عدد سندات بدل التالف.
+  int get replacementCount => transactions
+      .where(
+        (TransactionModel t) =>
+            t.transactionType == TransactionTypes.marketReplacement,
+      )
+      .length;
+
+  /// هل الكشف بلا حركات؟
+  bool get isEmpty => transactions.isEmpty;
+
+  @override
+  String toString() =>
+      'RepresentativeLedger($representativeName, cartons: $totalCartons, '
+      'vouchers: $voucherCount)';
+}
+
+/// اليومية المخزنية الشاملة ليوم واحد: الحركات وأرصدة بداية ونهاية اليوم.
+class DailyJournalReport {
+  const DailyJournalReport({
+    required this.date,
+    required this.transactions,
+    required this.openingBalance,
+    required this.closingBalance,
+    this.warehouseId,
+  });
+
+  /// اليوم المخزني (00:00).
+  final DateTime date;
+
+  /// كل الحركات المعتمدة في اليوم مرتبة زمنيًا.
+  final List<TransactionModel> transactions;
+
+  /// رصيد بداية اليوم (كراتين).
+  final int openingBalance;
+
+  /// رصيد نهاية اليوم الصافي (كراتين).
+  final int closingBalance;
+
+  /// المخزن المحدد، أو `null` عند شمول كل المخازن.
+  final int? warehouseId;
+
+  /// حركات الاستلام من المصنع.
+  List<TransactionModel> get inboundTransactions =>
+      _ofType(TransactionTypes.inbound);
+
+  /// حركات الصرف للمناديب.
+  List<TransactionModel> get outboundTransactions =>
+      _ofType(TransactionTypes.outbound);
+
+  /// حركات بدل التالف المعتمدة.
+  List<TransactionModel> get replacementTransactions =>
+      _ofType(TransactionTypes.marketReplacement);
+
+  /// محاضر الإتلاف المخزني المعتمدة.
+  List<TransactionModel> get damageTransactions =>
+      _ofType(TransactionTypes.damage);
+
+  /// حركات تسوية الجرد.
+  List<TransactionModel> get adjustmentTransactions =>
+      _ofType(TransactionTypes.adjustment);
+
+  /// إجمالي الكراتين الواردة.
+  int get inboundCartons => _absoluteTotal(TransactionTypes.inbound);
+
+  /// إجمالي الكراتين المنصرفة.
+  int get outboundCartons => _absoluteTotal(TransactionTypes.outbound);
+
+  /// إجمالي كراتين بدل التالف.
+  int get replacementCartons =>
+      _absoluteTotal(TransactionTypes.marketReplacement);
+
+  /// إجمالي الكراتين المتلفة.
+  int get damagedCartons => _absoluteTotal(TransactionTypes.damage);
+
+  /// صافي أثر تسويات الجرد (موجب للفائض وسالب للعجز).
+  int get adjustmentCartons => adjustmentTransactions.fold<int>(
+    0,
+    (int sum, TransactionModel t) => sum + t.quantity,
+  );
+
+  /// إجمالي التالف والبدل (كراتين).
+  int get damagedAndReplacementCartons => damagedCartons + replacementCartons;
+
+  /// صافي حركة اليوم = الوارد − المنصرف − التالف والبدل + صافي التسويات.
+  int get netChange =>
+      inboundCartons -
+      outboundCartons -
+      damagedAndReplacementCartons +
+      adjustmentCartons;
+
+  /// عدد السندات المنفذة خلال اليوم.
+  int get voucherCount => transactions.length;
+
+  /// هل اليوم بلا حركات؟
+  bool get isEmpty => transactions.isEmpty;
+
+  List<TransactionModel> _ofType(String type) => transactions
+      .where((TransactionModel t) => t.transactionType == type)
+      .toList(growable: false);
+
+  int _absoluteTotal(String type) => _ofType(
+    type,
+  ).fold<int>(0, (int sum, TransactionModel t) => sum + t.quantity.abs());
+
+  @override
+  String toString() =>
+      'DailyJournalReport($date, vouchers: $voucherCount, '
+      'opening: $openingBalance, closing: $closingBalance)';
 }
