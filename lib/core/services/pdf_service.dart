@@ -26,9 +26,13 @@ final PdfColor _pdfText = PdfColor.fromHex('#0B2A3D');
 final PdfColor _pdfMuted = PdfColor.fromHex('#5B7A8C');
 final PdfColor _pdfOutline = PdfColor.fromHex('#D3E3EE');
 final PdfColor _pdfSoft = PdfColor.fromHex('#F5F9FC');
+final PdfColor _pdfTotalRow = PdfColor.fromHex('#ECECEC');
 
 /// خدمة توليد سندات PDF العربية الرسمية (استلام/صرف/إتلاف/بدل تالف/تسوية)
 /// ومحاضر الجرد وتقارير المخزون، بترويسة مصنع رواء الرسمية.
+///
+/// التصميم محاسبي رسمي مؤطر بجداول (ERP): سندات A5 بإطار ترويسة وشبكة بيانات
+/// وجدول صنف مؤطر، وتقارير A4 بجدول حركة تحليلي ورصيد تراكمي وتذييل من 3 أقسام.
 ///
 /// الخط العربي: يُحمَّل من أصل محلي مضمَّن (`assets/fonts/Cairo-Regular.ttf`) حتى
 /// تعمل الطباعة دون إنترنت، ثم يُجرَّب خط Google Fonts (Cairo) عند غياب الأصل،
@@ -134,6 +138,8 @@ class PdfService {
     final String keeperName = await _resolveStorekeeperName(storekeeperName);
     await _ensureLogo();
     final bool pending = transaction.isPending;
+    final int perCarton = _bottlesPerCarton(item);
+    final int cartons = transaction.quantity.abs();
 
     final pw.Document document = pw.Document(
       title: '${info.title} - ${transaction.voucherNumber}',
@@ -150,50 +156,87 @@ class PdfService {
           margin: _voucherMargin,
           pending: pending,
         ),
-        footer: _footer,
+        footer: (pw.Context context) => _pageFooter(
+          context: context,
+          printedBy: keeperName,
+          printedAt: transaction.createdAt,
+        ),
         build: (pw.Context context) => _rtl(<pw.Widget>[
           buildOfficialLetterhead(
             title: info.documentTitle,
             voucherNumber: transaction.voucherNumber,
             accent: info.accent,
           ),
-          pw.SizedBox(height: 6),
+          pw.SizedBox(height: 4),
+          _voucherTitleBar(info.title, accent: info.accent),
           if (pending) ...<pw.Widget>[
+            pw.SizedBox(height: 4),
             _statusBanner(
               title: pendingWatermarkText,
               subtitle:
                   'لم يُخصم أي رصيد من المخزن. يُنفَّذ السند فقط بعد اعتماد الإدارة.',
             ),
-            pw.SizedBox(height: 6),
           ],
-          _metaRow(
-            warehouse: warehouse,
-            primaryLabel: 'المخزن',
-            secondaryLabel: 'تاريخ ووقت الإصدار',
-            secondaryValue: AppFormatters.dateTime(transaction.createdAt),
-          ),
-          pw.SizedBox(height: 6),
-          _quantityBanner(
-            label: info.quantityLabel,
-            quantity: transaction.quantity,
-            item: item,
-            accent: info.accent,
-            soft: info.accentSoft,
-          ),
-          pw.SizedBox(height: 6),
-          _sectionTitle('بيانات السند'),
-          pw.SizedBox(height: 3),
-          _detailsBox(_detailRows(transaction, item)),
           pw.SizedBox(height: 5),
-          _sectionTitle('التوقيعات والاعتماد'),
+          _erpInfoGrid(
+            primary: <_ErpField>[
+              _ErpField('رقم السند', transaction.voucherNumber),
+              _ErpField(
+                'التاريخ',
+                AppFormatters.dateTime(transaction.createdAt),
+              ),
+              _ErpField(
+                'رقم أمر الصرف / المرجع',
+                _valueOrFallback(_orderReference(transaction)),
+              ),
+              _ErpField('المخزن', _warehouseLine(warehouse)),
+            ],
+            secondary: <_ErpField>[
+              _ErpField('نوع الحركة', info.movementLabel),
+              _ErpField(
+                'البيان / المستلم',
+                _valueOrFallback(transaction.partyName),
+              ),
+              _ErpField('السبب / الملاحظات', _remarks(transaction)),
+              _ErpField(
+                'رقم اللوحة / السيارة',
+                _valueOrFallback(transaction.vehicleNumber),
+              ),
+            ],
+          ),
+          pw.SizedBox(height: 6),
+          _erpTable(
+            headers: <String>[
+              'م',
+              'رقم الصنف',
+              'اسم الصنف',
+              'المواصفات',
+              'الوحدة',
+              'الكمية (كرتون)',
+              'إجمالي العبوات',
+            ],
+            rows: <List<String>>[
+              <String>[
+                '1',
+                _itemCode(item),
+                item.name,
+                _specifications(item),
+                AppConstants.cartonUnit,
+                AppFormatters.number(cartons),
+                AppFormatters.number(cartons * perCarton),
+              ],
+            ],
+            flexes: <double>[0.5, 1.2, 2.4, 2.4, 1.0, 1.4, 1.5],
+            borderWidth: 0.8,
+            bodyFontSize: 7.4,
+          ),
           pw.SizedBox(height: 3),
-          _signaturesSection(
+          _packagesTotalBar(cartons: cartons, perCarton: perCarton),
+          pw.SizedBox(height: 7),
+          _voucherSignatureRow(
             storekeeperName: keeperName,
-            partyTitle: info.partyTitle,
-            partyName: transaction.partyName,
-            partyMeta: _partyMeta(transaction),
-            orderReference: _orderReference(transaction),
-            accent: info.accent,
+            receiverLabel: info.receiverLabel,
+            receiverName: transaction.partyName,
           ),
         ]),
       ),
@@ -213,26 +256,24 @@ class PdfService {
     final String keeperName = await _resolveStorekeeperName(storekeeperName);
     await _ensureLogo();
     final String reference = stocktakeReference(stocktake);
+    final int perCarton = _bottlesPerCarton(item);
+    final int actual = stocktake.actualQuantity;
     final String status;
     final PdfColor accent;
-    final PdfColor soft;
 
     if (stocktake.difference == 0) {
       status = 'مطابق تماماً للرصيد الدفتري';
       accent = _pdfPrimaryDark;
-      soft = PdfColor.fromHex('#E9F4FB');
     } else if (stocktake.isShortage) {
       status =
           'عجز بمقدار '
           '${AppFormatters.number(stocktake.difference.abs())} ${item.unit}';
       accent = _pdfDanger;
-      soft = PdfColor.fromHex('#FBECEC');
     } else {
       status =
           'فائض بمقدار '
           '${AppFormatters.number(stocktake.difference)} ${item.unit}';
       accent = _pdfWarning;
-      soft = PdfColor.fromHex('#FFF6E3');
     }
 
     final pw.Document document = pw.Document(
@@ -250,70 +291,83 @@ class PdfService {
           margin: _voucherMargin,
           pending: false,
         ),
-        footer: _footer,
+        footer: (pw.Context context) => _pageFooter(
+          context: context,
+          printedBy: keeperName,
+          printedAt: stocktake.createdAt,
+        ),
         build: (pw.Context context) => _rtl(<pw.Widget>[
           buildOfficialLetterhead(
             title: 'محضر جرد وتسوية مخزنية',
             voucherNumber: reference,
             accent: accent,
           ),
-          pw.SizedBox(height: 8),
-          _metaRow(
-            warehouse: warehouse,
-            primaryLabel: 'المخزن المجرود',
-            secondaryLabel: 'تاريخ ووقت الجرد',
-            secondaryValue: AppFormatters.dateTime(stocktake.createdAt),
-          ),
-          pw.SizedBox(height: 8),
-          _quantityBanner(
-            label: 'الرصيد الفعلي بعد الجرد',
-            caption: 'الكمية المعدودة فعلياً داخل المخزن',
-            quantity: stocktake.actualQuantity,
-            item: item,
-            accent: accent,
-            soft: soft,
-          ),
-          pw.SizedBox(height: 8),
-          _sectionTitle('نتيجة المطابقة'),
+          pw.SizedBox(height: 4),
+          _voucherTitleBar('محضر جرد وتسوية مخزنية', accent: accent),
           pw.SizedBox(height: 5),
-          _detailsBox(<_DetailEntry>[
-            _DetailEntry('الصنف', item.name),
-            _DetailEntry('المواصفات', _specifications(item)),
-            _DetailEntry(
+          _erpInfoGrid(
+            primary: <_ErpField>[
+              _ErpField('رقم المحضر', reference),
+              _ErpField('التاريخ', AppFormatters.dateTime(stocktake.createdAt)),
+              _ErpField('المخزن المجرود', _warehouseLine(warehouse)),
+              _ErpField('نتيجة المطابقة', status),
+            ],
+            secondary: <_ErpField>[
+              _ErpField('نوع الحركة', 'جرد وتسوية مخزنية'),
+              _ErpField('البيان / المسؤول', keeperName),
+              _ErpField(
+                'السبب / الملاحظات',
+                _hasText(stocktake.notes)
+                    ? stocktake.notes!.trim()
+                    : 'لا توجد ملاحظات مسجلة.',
+              ),
+              _ErpField('رقم اللوحة / السيارة', '—'),
+            ],
+          ),
+          pw.SizedBox(height: 6),
+          _erpTable(
+            headers: <String>[
+              'م',
+              'رقم الصنف',
+              'اسم الصنف',
+              'المواصفات',
+              'الوحدة',
+              'الكمية (كرتون)',
+              'إجمالي العبوات',
+            ],
+            rows: <List<String>>[
+              <String>[
+                '1',
+                _itemCode(item),
+                item.name,
+                _specifications(item),
+                AppConstants.cartonUnit,
+                AppFormatters.number(actual),
+                AppFormatters.number(actual * perCarton),
+              ],
+            ],
+            flexes: <double>[0.5, 1.2, 2.4, 2.4, 1.0, 1.4, 1.5],
+            borderWidth: 0.8,
+            bodyFontSize: 7.4,
+          ),
+          pw.SizedBox(height: 3),
+          _summaryStrip(<_ErpField>[
+            _ErpField(
               'الرصيد الدفتري',
-              _quantityWithUnits(stocktake.systemQuantity, item),
+              AppFormatters.number(stocktake.systemQuantity),
             ),
-            _DetailEntry(
-              'الرصيد الفعلي المعدود',
-              _quantityWithUnits(stocktake.actualQuantity, item),
-              highlight: true,
-            ),
-            _DetailEntry(
+            _ErpField('الرصيد الفعلي المعدود', AppFormatters.number(actual)),
+            _ErpField(
               'الفارق',
-              stocktake.difference == 0
-                  ? 'مطابق (صفر)'
-                  : '${_quantityWithUnits(stocktake.difference.abs(), item)} '
-                        '${stocktake.isShortage ? '(عجز)' : '(فائض)'}',
-              highlight: true,
-            ),
-            _DetailEntry('حالة الجرد', status),
-            _DetailEntry(
-              'مبرر الفارق',
-              (stocktake.notes ?? '').trim().isEmpty
-                  ? 'لا توجد ملاحظات مسجلة.'
-                  : stocktake.notes!.trim(),
+              '${stocktake.difference < 0 ? '−' : '+'}'
+                  '${AppFormatters.number(stocktake.difference.abs())}',
             ),
           ]),
           pw.SizedBox(height: 7),
-          _sectionTitle('التوقيعات والاعتماد'),
-          pw.SizedBox(height: 5),
-          _signaturesSection(
+          _voucherSignatureRow(
             storekeeperName: keeperName,
-            partyTitle: 'لجنة الجرد',
-            partyName: 'لجنة الجرد / المعتمد',
-            partyMeta: 'الرصيد الفعلي: ${stocktake.actualQuantity}',
-            orderReference: reference,
-            accent: accent,
+            receiverLabel: 'لجنة الجرد / المعتمد',
+            receiverName: 'لجنة الجرد',
           ),
         ]),
       ),
@@ -336,11 +390,16 @@ class PdfService {
     final String keeperName = await _resolveStorekeeperName(storekeeperName);
     await _ensureLogo();
     final String reference = summaryReportReference(generatedAt);
+    final int perCarton = _bottlesPerCarton(item);
     final String periodLabel = period == null
         ? 'كل الفترات المسجلة'
-        : '${AppFormatters.date(period.start)} إلى '
+        : 'من ${AppFormatters.date(period.start)} إلى '
               '${AppFormatters.date(period.end)}';
     final String scopeLabel = warehouse?.name ?? 'كل المخازن';
+    final int totalRepVouchers = representatives.fold<int>(
+      0,
+      (int sum, RepresentativeSummary r) => sum + r.voucherCount,
+    );
 
     final pw.Document document = pw.Document(
       title: 'تقرير المخزون العام - $reference',
@@ -357,62 +416,106 @@ class PdfService {
           margin: _reportMargin,
           pending: false,
         ),
-        footer: _footer,
+        footer: (pw.Context context) => _pageFooter(
+          context: context,
+          printedBy: keeperName,
+          printedAt: generatedAt,
+        ),
         build: (pw.Context context) => _rtl(<pw.Widget>[
           buildOfficialLetterhead(
             title: 'تقرير حركة المخزون العام',
             voucherNumber: reference,
             accent: _pdfPrimary,
           ),
-          pw.SizedBox(height: 12),
-          pw.Row(
-            children: <pw.Widget>[
-              pw.Expanded(
-                child: _metaBox(
-                  label: 'نطاق التقرير',
-                  value: scopeLabel,
-                  sub: 'الفترة: $periodLabel',
-                ),
-              ),
-              pw.SizedBox(width: 10),
-              pw.Expanded(
-                child: _metaBox(
-                  label: 'تاريخ إصدار التقرير',
-                  value: AppFormatters.dateTime(generatedAt),
-                  sub: 'عدد السندات: ${metrics.voucherCount}',
-                ),
-              ),
-            ],
-          ),
-          pw.SizedBox(height: 14),
-          _sectionTitle('ملخص حركة المخزون'),
-          pw.SizedBox(height: 8),
-          _summaryMetricsGrid(metrics),
-          pw.SizedBox(height: 10),
-          _notesBox(
-            'الصنف: ${item.name}  |  ${_specifications(item)}  |  '
-            'عدد السندات: ${AppFormatters.number(metrics.voucherCount)}',
-          ),
-          pw.SizedBox(height: 16),
-          _sectionTitle('مسحوبات المناديب (الأكثر سحباً)'),
           pw.SizedBox(height: 6),
+          _voucherTitleBar(
+            'تقرير حركة مخزون تحليلي كميات',
+            accent: _pdfPrimary,
+          ),
+          pw.SizedBox(height: 6),
+          _identityBar(<_ErpField>[
+            _ErpField('رقم الصنف', _itemCode(item), flex: 0.8),
+            _ErpField(
+              'اسم الصنف',
+              '${item.name}  ${_specifications(item)}',
+              flex: 2.0,
+            ),
+            _ErpField('الفترة', periodLabel, flex: 1.6),
+            _ErpField('المخزن', scopeLabel, flex: 1.2),
+          ]),
+          pw.SizedBox(height: 10),
+          _erpTable(
+            headers: <String>[
+              'الوارد (كرتون)',
+              'المنصرف (كرتون)',
+              'التالف (كرتون)',
+              'صافي التغير',
+              'عدد السندات',
+            ],
+            rows: <List<String>>[
+              <String>[
+                AppFormatters.number(metrics.totalInbound),
+                AppFormatters.number(metrics.totalOutbound),
+                AppFormatters.number(metrics.totalDamaged),
+                '${metrics.netChange < 0 ? '−' : '+'}'
+                    '${AppFormatters.number(metrics.netChange.abs())}',
+                AppFormatters.number(metrics.voucherCount),
+              ],
+            ],
+            flexes: <double>[1, 1, 1, 1, 1],
+            bodyFontSize: 9,
+          ),
+          pw.SizedBox(height: 4),
+          _notesBox(
+            'المعادلة: الوارد − المنصرف − التالف = صافي التغير  |  '
+            'سعة الكرتون: $perCarton قنينة × ${_bottleVolume(item)} مل  |  '
+            'تاريخ الإصدار: ${AppFormatters.dateTime(generatedAt)}',
+          ),
+          pw.SizedBox(height: 12),
+          _sectionTitle('مسحوبات المناديب (الأكثر سحباً)'),
+          pw.SizedBox(height: 5),
           if (representatives.isEmpty)
             _notesBox('لا توجد عمليات صرف مسجلة في الفترة المحددة.')
           else
-            _representativesBox(
-              representatives: representatives,
-              totalOutbound: metrics.totalOutbound,
-              unit: item.unit,
+            _erpTable(
+              headers: <String>[
+                '#',
+                'المندوب / الموزّع',
+                'الكراتين',
+                'العبوات',
+                'عدد السندات',
+                'النسبة',
+              ],
+              rows: <List<String>>[
+                for (int index = 0; index < representatives.length; index++)
+                  <String>[
+                    '${index + 1}',
+                    representatives[index].name,
+                    AppFormatters.number(representatives[index].totalQuantity),
+                    AppFormatters.number(
+                      representatives[index].totalQuantity * perCarton,
+                    ),
+                    AppFormatters.number(representatives[index].voucherCount),
+                    '${(representatives[index].shareOf(metrics.totalOutbound) * 100).round()}%',
+                  ],
+              ],
+              flexes: <double>[0.5, 3.0, 1.2, 1.4, 1.2, 1.0],
+              bodyFontSize: 8,
+              alignRightIndex: 1,
+              totalRow: <String>[
+                '',
+                'إجمالي كميات',
+                AppFormatters.number(metrics.totalOutbound),
+                AppFormatters.number(metrics.totalOutbound * perCarton),
+                AppFormatters.number(totalRepVouchers),
+                '100%',
+              ],
             ),
-          pw.SizedBox(height: 18),
-          _sectionTitle('التوقيعات والاعتماد'),
-          pw.SizedBox(height: 6),
-          _signaturesSection(
+          pw.SizedBox(height: 14),
+          _signaturesLines(
             storekeeperName: keeperName,
-            partyTitle: 'إدارة المخازن',
-            partyName: 'إدارة المخازن / المشرف',
-            orderReference: reference,
-            accent: _pdfPrimaryDark,
+            secondTitle: 'إدارة المخازن / المشرف',
+            secondName: 'المشرف المخزني',
           ),
         ]),
       ),
@@ -423,8 +526,9 @@ class PdfService {
 
   /// يبني كشف مسحوبات موزّع/مندوب رسميًا بمقاس A4.
   ///
-  /// يتضمن بطاقة تعريف المندوب، فترة الكشف، جدول السندات المسحوبة
-  /// (صرف عادي + بدل تالف معتمد)، صندوق الإجماليات، وخانات التواقيع الثلاث.
+  /// يعرض شريط تعريف الصنف والفترة، ثم جدول الحركة التحليلي بأعمدة
+  /// (المستند، التاريخ، النوع، البيان، الوحدة، الوارد، المنصرف، الرصيد)
+  /// مع الرصيد التراكمي وسطر إجمالي ختامي وتذييل رسمي من 3 أقسام.
   Future<Uint8List> generateRepresentativeStatementPdf({
     required RepresentativeLedger ledger,
     required ItemModel item,
@@ -442,7 +546,7 @@ class PdfService {
     final String reference = representativeStatementReference(generatedAt);
     final int perCarton = _bottlesPerCarton(item);
     final String periodLabel =
-        '${AppFormatters.date(ledger.startDate)} إلى '
+        'من ${AppFormatters.date(ledger.startDate)} إلى '
         '${AppFormatters.date(ledger.endDate)}';
     final String scopeLabel = warehouse?.name ?? 'كل المخازن';
     final String contact = _contactLine(
@@ -450,21 +554,28 @@ class PdfService {
       vehicle: representativeVehicle,
     );
 
-    final List<List<String>> rows = <List<String>>[
-      for (final TransactionModel transaction in ledger.transactions)
-        <String>[
-          _shortDateTime(transaction.createdAt),
-          transaction.voucherNumber,
-          warehouseNames[transaction.warehouseId] ??
-              'مخزن #${transaction.warehouseId}',
-          _typeLabel(transaction.transactionType),
-          _hasText(transaction.orderReference)
-              ? transaction.orderReference!.trim()
-              : '—',
-          AppFormatters.number(transaction.quantity.abs()),
-          AppFormatters.number(transaction.quantity.abs() * perCarton),
-        ],
-    ];
+    final List<_LedgerRow> rows = <_LedgerRow>[];
+    int running = 0;
+    for (final TransactionModel transaction in ledger.transactions) {
+      final int quantity = transaction.quantity.abs();
+      running += quantity;
+      rows.add(
+        _LedgerRow(
+          voucherNumber: transaction.voucherNumber,
+          date: AppFormatters.date(transaction.createdAt),
+          documentType: _typeLabel(transaction.transactionType),
+          description: _movementDescription(transaction),
+          outbound: quantity,
+          balance: running,
+        ),
+      );
+    }
+    int inboundTotal = 0;
+    int outboundTotal = 0;
+    for (final _LedgerRow row in rows) {
+      inboundTotal += row.inbound;
+      outboundTotal += row.outbound;
+    }
 
     final pw.Document document = pw.Document(
       title: 'كشف مسحوبات ${ledger.representativeName} - $reference',
@@ -481,145 +592,65 @@ class PdfService {
           margin: _reportMargin,
           pending: false,
         ),
-        footer: _footer,
+        footer: (pw.Context context) => _pageFooter(
+          context: context,
+          printedBy: keeperName,
+          printedAt: generatedAt,
+        ),
         build: (pw.Context context) => _rtl(<pw.Widget>[
           buildOfficialLetterhead(
             title: 'كشف مسحوبات موزع / مندوب',
             voucherNumber: reference,
             accent: _pdfPrimaryDark,
           ),
-          pw.SizedBox(height: 12),
-          pw.Row(
-            children: <pw.Widget>[
-              pw.Expanded(
-                child: _metaBox(
-                  label: 'المندوب / الموزّع',
-                  value: ledger.representativeName,
-                  sub: contact,
-                ),
-              ),
-              pw.SizedBox(width: 10),
-              pw.Expanded(
-                child: _metaBox(
-                  label: 'فترة الكشف',
-                  value: periodLabel,
-                  sub: 'النطاق: $scopeLabel',
-                ),
-              ),
-            ],
-          ),
-          pw.SizedBox(height: 8),
-          pw.Row(
-            children: <pw.Widget>[
-              pw.Expanded(
-                child: _metaBox(
-                  label: 'تاريخ إصدار الكشف',
-                  value: AppFormatters.dateTime(generatedAt),
-                  sub: 'عدد السندات: ${ledger.voucherCount}',
-                ),
-              ),
-              pw.SizedBox(width: 10),
-              pw.Expanded(
-                child: _metaBox(
-                  label: 'سعة الكرتون',
-                  value: '$perCarton قنينة × ${_bottleVolume(item)} مل',
-                  sub: 'الصنف: ${item.name}',
-                ),
-              ),
-            ],
-          ),
-          pw.SizedBox(height: 14),
-          pw.Row(
-            children: <pw.Widget>[
-              pw.Expanded(
-                child: _totalTile(
-                  label: 'إجمالي الكراتين المنصرفة',
-                  value: AppFormatters.number(ledger.totalCartons),
-                  unit: AppConstants.cartonUnit,
-                  accent: _pdfPrimaryDark,
-                  soft: PdfColor.fromHex('#E9F0FA'),
-                ),
-              ),
-              pw.SizedBox(width: 10),
-              pw.Expanded(
-                child: _totalTile(
-                  label: 'إجمالي العبوات',
-                  value: AppFormatters.number(ledger.totalCartons * perCarton),
-                  unit: 'عبوة',
-                  accent: _pdfPrimary,
-                  soft: PdfColor.fromHex('#E7F4FB'),
-                ),
-              ),
-              pw.SizedBox(width: 10),
-              pw.Expanded(
-                child: _totalTile(
-                  label: 'عدد السندات',
-                  value: AppFormatters.number(ledger.voucherCount),
-                  unit: 'سند',
-                  accent: _pdfPrimaryDark,
-                  soft: _pdfSoft,
-                ),
-              ),
-            ],
-          ),
-          pw.SizedBox(height: 14),
-          _sectionTitle('تفاصيل السندات المسحوبة'),
           pw.SizedBox(height: 6),
+          _voucherTitleBar(
+            'كشف مسحوبات تحليلي كميات — ${ledger.representativeName}',
+            accent: _pdfPrimaryDark,
+          ),
+          pw.SizedBox(height: 6),
+          _identityBar(<_ErpField>[
+            _ErpField('رقم الصنف', _itemCode(item), flex: 0.8),
+            _ErpField(
+              'اسم الصنف',
+              '${item.name}  ${_specifications(item)}',
+              flex: 2.0,
+            ),
+            _ErpField('الفترة', periodLabel, flex: 1.6),
+            _ErpField('المخزن', scopeLabel, flex: 1.2),
+          ]),
+          pw.SizedBox(height: 5),
+          _identityBar(<_ErpField>[
+            _ErpField('المندوب', ledger.representativeName, flex: 1.4),
+            _ErpField('بيانات التواصل', contact, flex: 1.8),
+            _ErpField('عدد السندات', '${ledger.voucherCount}', flex: 0.8),
+          ]),
+          pw.SizedBox(height: 8),
           if (rows.isEmpty)
             _notesBox(
               'لا توجد سندات صرف أو بدل تالف معتمدة لهذا المندوب داخل الفترة '
               'المحددة.',
             )
-          else
-            ..._tableBlocks(
-              headers: <String>[
-                'التاريخ والوقت',
-                'رقم السند',
-                'المخزن',
-                'نوع السند',
-                'أمر الصرف',
-                'كراتين',
-                'عبوات',
-              ],
+          else ...<pw.Widget>[
+            _ledgerTable(
               rows: rows,
-              widths: <double>[62, 88, 90, 82, 74, 44, 50],
-              accent: _pdfPrimaryDark,
+              unit: AppConstants.cartonUnit,
+              inboundTotal: inboundTotal,
+              outboundTotal: outboundTotal,
+              closingBalance: running,
             ),
-          pw.SizedBox(height: 8),
-          _notesBox(
-            'صافي المسحوبات: '
-            '${AppFormatters.formatQuantityWithBottles(ledger.totalCartons, bottlesPerCarton: perCarton)}'
-            '  |  سندات الصرف: ${ledger.outboundCount}'
-            '  |  سندات بدل التالف: ${ledger.replacementCount}',
+            pw.SizedBox(height: 3),
+            _packagesTotalBar(
+              cartons: inboundTotal + outboundTotal,
+              perCarton: perCarton,
+            ),
+          ],
+          pw.SizedBox(height: 10),
+          _signaturesLines(
+            storekeeperName: keeperName,
+            secondTitle: 'المندوب / الموزّع (للمطابقة)',
+            secondName: ledger.representativeName,
           ),
-          pw.SizedBox(height: 16),
-          _sectionTitle('التوقيعات والاعتماد'),
-          pw.SizedBox(height: 6),
-          pw.Row(
-            crossAxisAlignment: pw.CrossAxisAlignment.start,
-            children: <pw.Widget>[
-              pw.Expanded(
-                child: _signatureBox(
-                  title: storekeeperSignatureTitle(keeperName),
-                  extra: 'المسؤول عن المخزن والعهدة',
-                  accent: _pdfPrimaryDark,
-                ),
-              ),
-              pw.SizedBox(width: 8),
-              pw.Expanded(
-                child: _signatureBox(
-                  title: 'المندوب / الموزّع (للمطابقة)',
-                  subtitle: ledger.representativeName,
-                  extra: _hasText(representativeVehicle)
-                      ? 'رقم اللوحة: ${representativeVehicle!.trim()}'
-                      : contact,
-                  accent: _pdfPrimaryDark,
-                ),
-              ),
-            ],
-          ),
-          pw.SizedBox(height: 6),
-          _approvalBox(orderReference: reference, accent: _pdfPrimaryDark),
         ]),
       ),
     );
@@ -629,8 +660,8 @@ class PdfService {
 
   /// يبني اليومية المخزنية الشاملة ليوم واحد بمقاس A4.
   ///
-  /// تعرض ميزان اليوم (بداية، وارد، منصرف، تالف وبدل، نهاية) ثم جدول كل
-  /// الحركات المنفذة مرتبة زمنيًا، وتُختم بتوقيع أمين المخزن واعتماد الإدارة.
+  /// تعرض رصيد بداية ونهاية اليوم في شريط مؤطر، ثم جدول كل الحركات المنفذة
+  /// بأعمدة الوارد والمنصرف والرصيد التراكمي، وتُختم بالتواقيع والتذييل الرسمي.
   Future<Uint8List> generateDailyJournalPdf({
     required DailyJournalReport journal,
     required ItemModel item,
@@ -647,20 +678,29 @@ class PdfService {
     final int perCarton = _bottlesPerCarton(item);
     final String scopeLabel = warehouse?.name ?? 'كل المخازن';
 
-    final List<List<String>> rows = <List<String>>[
-      for (final TransactionModel transaction in journal.transactions)
-        <String>[
-          AppFormatters.time(transaction.createdAt),
-          transaction.voucherNumber,
-          _typeLabel(transaction.transactionType),
-          _hasText(transaction.partyName) ? transaction.partyName!.trim() : '—',
-          _hasText(transaction.orderReference)
-              ? transaction.orderReference!.trim()
-              : '—',
-          AppFormatters.number(transaction.quantity.abs()),
-          AppFormatters.number(transaction.quantity.abs() * perCarton),
-        ],
-    ];
+    final List<_LedgerRow> rows = <_LedgerRow>[];
+    int running = journal.openingBalance;
+    for (final TransactionModel transaction in journal.transactions) {
+      final int signed = _signedQuantity(transaction);
+      running += signed;
+      rows.add(
+        _LedgerRow(
+          voucherNumber: transaction.voucherNumber,
+          date: AppFormatters.date(transaction.createdAt),
+          documentType: _typeLabel(transaction.transactionType),
+          description: _movementDescription(transaction),
+          inbound: signed > 0 ? signed : 0,
+          outbound: signed < 0 ? -signed : 0,
+          balance: running,
+        ),
+      );
+    }
+    int inboundTotal = 0;
+    int outboundTotal = 0;
+    for (final _LedgerRow row in rows) {
+      inboundTotal += row.inbound;
+      outboundTotal += row.outbound;
+    }
 
     final pw.Document document = pw.Document(
       title: 'اليومية المخزنية - $reference',
@@ -677,168 +717,74 @@ class PdfService {
           margin: _reportMargin,
           pending: false,
         ),
-        footer: _footer,
+        footer: (pw.Context context) => _pageFooter(
+          context: context,
+          printedBy: keeperName,
+          printedAt: generatedAt,
+        ),
         build: (pw.Context context) => _rtl(<pw.Widget>[
           buildOfficialLetterhead(
             title: 'اليومية المخزنية لحركة البضائع',
             voucherNumber: reference,
             accent: _pdfPrimary,
           ),
-          pw.SizedBox(height: 12),
-          pw.Row(
-            children: <pw.Widget>[
-              pw.Expanded(
-                child: _metaBox(
-                  label: 'اليوم المخزني',
-                  value: AppFormatters.date(journal.date),
-                  sub:
-                      'عدد الحركات: ${AppFormatters.number(journal.voucherCount)}',
-                ),
-              ),
-              pw.SizedBox(width: 10),
-              pw.Expanded(
-                child: _metaBox(
-                  label: 'المخزن',
-                  value: scopeLabel,
-                  sub: 'الصنف: ${item.name}',
-                ),
-              ),
-            ],
-          ),
-          pw.SizedBox(height: 8),
-          pw.Row(
-            children: <pw.Widget>[
-              pw.Expanded(
-                child: _metaBox(
-                  label: 'أمين المخزن المسؤول',
-                  value: keeperName,
-                  sub:
-                      'سعة الكرتون: $perCarton قنينة × ${_bottleVolume(item)} مل',
-                ),
-              ),
-              pw.SizedBox(width: 10),
-              pw.Expanded(
-                child: _metaBox(
-                  label: 'تاريخ طباعة اليومية',
-                  value: AppFormatters.dateTime(generatedAt),
-                  sub:
-                      'صافي الحركة: '
-                      '${journal.netChange < 0 ? '−' : '+'}'
-                      '${AppFormatters.number(journal.netChange.abs())} '
-                      '${AppConstants.cartonUnit}',
-                ),
-              ),
-            ],
-          ),
-          pw.SizedBox(height: 14),
-          _sectionTitle('ميزان اليوم المخزني'),
-          pw.SizedBox(height: 8),
-          pw.Row(
-            children: <pw.Widget>[
-              pw.Expanded(
-                child: _totalTile(
-                  label: 'رصيد بداية اليوم',
-                  value: AppFormatters.number(journal.openingBalance),
-                  unit: AppConstants.cartonUnit,
-                  accent: _pdfPrimaryDark,
-                  soft: _pdfSoft,
-                ),
-              ),
-              pw.SizedBox(width: 10),
-              pw.Expanded(
-                child: _totalTile(
-                  label: 'إجمالي الوارد',
-                  value: AppFormatters.number(journal.inboundCartons),
-                  unit: AppConstants.cartonUnit,
-                  accent: _pdfPrimary,
-                  soft: PdfColor.fromHex('#E7F4FB'),
-                ),
-              ),
-              pw.SizedBox(width: 10),
-              pw.Expanded(
-                child: _totalTile(
-                  label: 'إجمالي المنصرف',
-                  value: AppFormatters.number(journal.outboundCartons),
-                  unit: AppConstants.cartonUnit,
-                  accent: _pdfPrimaryDark,
-                  soft: PdfColor.fromHex('#E9F0FA'),
-                ),
-              ),
-            ],
-          ),
-          pw.SizedBox(height: 10),
-          pw.Row(
-            children: <pw.Widget>[
-              pw.Expanded(
-                child: _totalTile(
-                  label: 'التالف والبدل',
-                  value: AppFormatters.number(
-                    journal.damagedAndReplacementCartons,
-                  ),
-                  unit: AppConstants.cartonUnit,
-                  accent: _pdfDanger,
-                  soft: PdfColor.fromHex('#FBECEC'),
-                ),
-              ),
-              pw.SizedBox(width: 10),
-              pw.Expanded(
-                child: _totalTile(
-                  label: 'تسويات الجرد',
-                  value:
-                      '${journal.adjustmentCartons < 0 ? '−' : '+'}'
-                      '${AppFormatters.number(journal.adjustmentCartons.abs())}',
-                  unit: AppConstants.cartonUnit,
-                  accent: _pdfWarning,
-                  soft: PdfColor.fromHex('#FFF6E3'),
-                ),
-              ),
-              pw.SizedBox(width: 10),
-              pw.Expanded(
-                child: _totalTile(
-                  label: 'رصيد نهاية اليوم',
-                  value: AppFormatters.number(journal.closingBalance),
-                  unit: AppConstants.cartonUnit,
-                  accent: _pdfPrimaryDark,
-                  soft: PdfColor.fromHex('#EFF7FD'),
-                ),
-              ),
-            ],
-          ),
-          pw.SizedBox(height: 8),
-          _notesBox(
-            'المعادلة: بداية اليوم + الوارد − المنصرف − التالف والبدل '
-            '+ التسويات = رصيد نهاية اليوم.',
-          ),
-          pw.SizedBox(height: 14),
-          _sectionTitle('تفاصيل الحركات المنفذة خلال اليوم'),
           pw.SizedBox(height: 6),
+          _voucherTitleBar(
+            'حركة مخزون تحليلي كميات حسب المخزن — '
+            '${AppFormatters.date(journal.date)}',
+            accent: _pdfPrimary,
+          ),
+          pw.SizedBox(height: 6),
+          _identityBar(<_ErpField>[
+            _ErpField('رقم الصنف', _itemCode(item), flex: 0.8),
+            _ErpField(
+              'اسم الصنف',
+              '${item.name}  ${_specifications(item)}',
+              flex: 2.0,
+            ),
+            _ErpField(
+              'الفترة',
+              'من ${AppFormatters.date(journal.date)} إلى '
+                  '${AppFormatters.date(journal.date)}',
+              flex: 1.6,
+            ),
+            _ErpField('المخزن', scopeLabel, flex: 1.2),
+          ]),
+          pw.SizedBox(height: 5),
+          _summaryStrip(<_ErpField>[
+            _ErpField(
+              'رصيد بداية اليوم',
+              AppFormatters.number(journal.openingBalance),
+            ),
+            _ErpField('إجمالي الوارد', AppFormatters.number(inboundTotal)),
+            _ErpField('إجمالي المنصرف', AppFormatters.number(outboundTotal)),
+            _ErpField(
+              'رصيد نهاية اليوم',
+              AppFormatters.number(journal.closingBalance),
+            ),
+          ]),
+          pw.SizedBox(height: 8),
           if (rows.isEmpty)
             _notesBox('لا توجد حركات معتمدة مسجلة في هذا اليوم.')
-          else
-            ..._tableBlocks(
-              headers: <String>[
-                'الوقت',
-                'رقم السند',
-                'النوع',
-                'السائق / المندوب',
-                'أمر الصرف',
-                'كراتين',
-                'عبوات',
-              ],
+          else ...<pw.Widget>[
+            _ledgerTable(
               rows: rows,
-              widths: <double>[46, 86, 72, 104, 78, 44, 50],
-              accent: _pdfPrimary,
+              unit: AppConstants.cartonUnit,
+              inboundTotal: inboundTotal,
+              outboundTotal: outboundTotal,
+              closingBalance: journal.closingBalance,
             ),
-          pw.SizedBox(height: 14),
-          _sectionTitle('التوقيعات والاعتماد'),
-          pw.SizedBox(height: 6),
-          _signaturesSection(
+            pw.SizedBox(height: 3),
+            _packagesTotalBar(
+              cartons: inboundTotal + outboundTotal,
+              perCarton: perCarton,
+            ),
+          ],
+          pw.SizedBox(height: 10),
+          _signaturesLines(
             storekeeperName: keeperName,
-            partyTitle: 'إدارة المخازن',
-            partyName: 'إدارة المخازن / المشرف',
-            partyMeta: 'اليوم: ${AppFormatters.date(journal.date)}',
-            orderReference: reference,
-            accent: _pdfPrimaryDark,
+            secondTitle: 'إدارة المخازن / المشرف',
+            secondName: 'المشرف المخزني',
           ),
         ]),
       ),
@@ -1246,80 +1192,501 @@ class PdfService {
   }
 
   // ---------------------------------------------------------------------------
-  // عناصر التصميم المشتركة
+  // عناصر التصميم المحاسبي المشتركة (ERP Tabular)
   // ---------------------------------------------------------------------------
 
-  pw.Widget _metaRow({
-    required WarehouseModel warehouse,
-    required String primaryLabel,
-    required String secondaryLabel,
-    required String secondaryValue,
-  }) {
-    return pw.Row(
-      children: <pw.Widget>[
-        pw.Expanded(
-          child: _metaBox(
-            label: primaryLabel,
-            value: warehouse.name,
-            sub: warehouse.location.trim().isEmpty
-                ? null
-                : 'الموقع: ${warehouse.location}',
-          ),
+  /// عنوان السند المؤطر في منتصف الوثيقة تحت الترويسة.
+  pw.Widget _voucherTitleBar(String title, {required PdfColor accent}) {
+    return pw.Container(
+      width: double.infinity,
+      padding: const pw.EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+      decoration: pw.BoxDecoration(
+        color: _pdfSoft,
+        border: pw.Border.all(color: PdfColors.black, width: 0.8),
+      ),
+      child: pw.Text(
+        title,
+        textAlign: pw.TextAlign.center,
+        textDirection: pw.TextDirection.rtl,
+        style: pw.TextStyle(
+          color: accent,
+          fontSize: 9.5,
+          fontWeight: pw.FontWeight.bold,
         ),
-        pw.SizedBox(width: 8),
-        pw.Expanded(
-          child: _metaBox(label: secondaryLabel, value: secondaryValue),
+      ),
+    );
+  }
+
+  /// شبكة بيانات السند في عمودين (يمين: بيانات المستند | يسار: بيانات الحركة).
+  pw.Widget _erpInfoGrid({
+    required List<_ErpField> primary,
+    required List<_ErpField> secondary,
+  }) {
+    final int count = primary.length > secondary.length
+        ? primary.length
+        : secondary.length;
+    return pw.Table(
+      border: pw.TableBorder.all(color: PdfColors.black, width: 0.8),
+      columnWidths: const <int, pw.TableColumnWidth>{
+        0: pw.FlexColumnWidth(1),
+        1: pw.FlexColumnWidth(1),
+      },
+      children: <pw.TableRow>[
+        for (int index = 0; index < count; index++)
+          pw.TableRow(
+            children: <pw.Widget>[
+              _erpInfoCell(secondary, index),
+              _erpInfoCell(primary, index),
+            ],
+          ),
+      ],
+    );
+  }
+
+  pw.Widget _erpInfoCell(List<_ErpField> fields, int index) {
+    if (index >= fields.length) {
+      return pw.SizedBox();
+    }
+    final _ErpField field = fields[index];
+    return pw.Padding(
+      padding: const pw.EdgeInsets.symmetric(horizontal: 4, vertical: 2.6),
+      child: pw.Row(
+        crossAxisAlignment: pw.CrossAxisAlignment.start,
+        children: <pw.Widget>[
+          pw.Expanded(
+            child: pw.Text(
+              field.value,
+              maxLines: 2,
+              overflow: pw.TextOverflow.clip,
+              textDirection: pw.TextDirection.rtl,
+              style: pw.TextStyle(
+                color: _pdfText,
+                fontSize: 7.2,
+                fontWeight: pw.FontWeight.bold,
+              ),
+            ),
+          ),
+          pw.SizedBox(width: 4),
+          pw.Text(
+            '${field.label} :',
+            textDirection: pw.TextDirection.rtl,
+            style: pw.TextStyle(color: _pdfMuted, fontSize: 6.8),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// شريط تعريف أفقي مؤطر (رقم الصنف | الاسم | الفترة | المخزن).
+  pw.Widget _identityBar(List<_ErpField> fields) {
+    return pw.Table(
+      border: pw.TableBorder.all(color: PdfColors.black, width: 0.6),
+      columnWidths: <int, pw.TableColumnWidth>{
+        for (int index = 0; index < fields.length; index++)
+          index: pw.FlexColumnWidth(fields[fields.length - 1 - index].flex),
+      },
+      children: <pw.TableRow>[
+        pw.TableRow(
+          children: <pw.Widget>[
+            for (final _ErpField field in fields.reversed)
+              pw.Padding(
+                padding: const pw.EdgeInsets.symmetric(
+                  horizontal: 4,
+                  vertical: 3,
+                ),
+                child: pw.Row(
+                  crossAxisAlignment: pw.CrossAxisAlignment.start,
+                  children: <pw.Widget>[
+                    pw.Expanded(
+                      child: pw.Text(
+                        field.value,
+                        maxLines: 1,
+                        overflow: pw.TextOverflow.clip,
+                        textDirection: pw.TextDirection.rtl,
+                        style: pw.TextStyle(
+                          color: _pdfText,
+                          fontSize: 7.4,
+                          fontWeight: pw.FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                    pw.SizedBox(width: 3),
+                    pw.Text(
+                      '${field.label} :',
+                      textDirection: pw.TextDirection.rtl,
+                      style: pw.TextStyle(color: _pdfMuted, fontSize: 6.6),
+                    ),
+                  ],
+                ),
+              ),
+          ],
         ),
       ],
     );
   }
 
-  pw.Widget _metaBox({
-    required String label,
-    required String value,
-    String? sub,
-  }) {
-    return pw.Container(
-      padding: const pw.EdgeInsets.symmetric(horizontal: 7, vertical: 4),
-      decoration: pw.BoxDecoration(
-        color: _pdfSoft,
-        borderRadius: pw.BorderRadius.circular(5),
-        border: pw.Border.all(color: _pdfOutline, width: 0.6),
-      ),
-      child: pw.Column(
-        crossAxisAlignment: pw.CrossAxisAlignment.start,
-        children: <pw.Widget>[
-          pw.Row(
-            children: <pw.Widget>[
-              pw.Text(
-                label,
-                textDirection: pw.TextDirection.rtl,
-                style: pw.TextStyle(color: _pdfMuted, fontSize: 7),
-              ),
-              pw.SizedBox(width: 4),
-              pw.Expanded(
-                child: pw.Text(
-                  value,
-                  maxLines: 1,
-                  textDirection: pw.TextDirection.rtl,
-                  style: pw.TextStyle(
-                    color: _pdfText,
-                    fontSize: 8.4,
-                    fontWeight: pw.FontWeight.bold,
-                  ),
+  /// شريط أرقام مؤطر (تسمية فوق القيمة) لأرصدة اليوم والمطابقة.
+  pw.Widget _summaryStrip(List<_ErpField> fields) {
+    return pw.Table(
+      border: pw.TableBorder.all(color: PdfColors.black, width: 0.6),
+      columnWidths: <int, pw.TableColumnWidth>{
+        for (int index = 0; index < fields.length; index++)
+          index: const pw.FlexColumnWidth(1),
+      },
+      children: <pw.TableRow>[
+        pw.TableRow(
+          children: <pw.Widget>[
+            for (final _ErpField field in fields.reversed)
+              pw.Padding(
+                padding: const pw.EdgeInsets.symmetric(
+                  horizontal: 4,
+                  vertical: 3,
+                ),
+                child: pw.Column(
+                  crossAxisAlignment: pw.CrossAxisAlignment.stretch,
+                  children: <pw.Widget>[
+                    pw.Text(
+                      field.label,
+                      maxLines: 1,
+                      textAlign: pw.TextAlign.center,
+                      textDirection: pw.TextDirection.rtl,
+                      style: pw.TextStyle(color: _pdfMuted, fontSize: 6.6),
+                    ),
+                    pw.SizedBox(height: 1),
+                    pw.Text(
+                      field.value,
+                      maxLines: 1,
+                      textAlign: pw.TextAlign.center,
+                      textDirection: pw.TextDirection.rtl,
+                      style: pw.TextStyle(
+                        color: _pdfPrimaryDark,
+                        fontSize: 9.5,
+                        fontWeight: pw.FontWeight.bold,
+                      ),
+                    ),
+                  ],
                 ),
               ),
-            ],
+          ],
+        ),
+      ],
+    );
+  }
+
+  /// جدول محاسبي مؤطر بخطوط سوداء، رأس مكرر عبر الصفحات.
+  pw.Widget _erpTable({
+    required List<String> headers,
+    required List<List<String>> rows,
+    required List<double> flexes,
+    double borderWidth = 0.6,
+    double bodyFontSize = 7,
+    int alignRightIndex = -1,
+    List<String>? totalRow,
+  }) {
+    final List<double> physicalFlexes = flexes.reversed.toList(growable: false);
+
+    List<pw.Widget> buildCells(
+      List<String> values, {
+      bool header = false,
+      bool bold = false,
+    }) {
+      final List<pw.Widget> cells = <pw.Widget>[];
+      for (int index = values.length - 1; index >= 0; index--) {
+        cells.add(
+          _erpTableCell(
+            values[index],
+            header: header,
+            bold: bold,
+            fontSize: bodyFontSize,
+            align: index == alignRightIndex
+                ? pw.TextAlign.right
+                : pw.TextAlign.center,
           ),
-          if (sub != null) ...<pw.Widget>[
-            pw.SizedBox(height: 1),
-            pw.Text(
-              sub,
+        );
+      }
+      return cells;
+    }
+
+    return pw.Table(
+      border: pw.TableBorder.all(color: PdfColors.black, width: borderWidth),
+      columnWidths: <int, pw.TableColumnWidth>{
+        for (int index = 0; index < physicalFlexes.length; index++)
+          index: pw.FlexColumnWidth(physicalFlexes[index]),
+      },
+      children: <pw.TableRow>[
+        pw.TableRow(
+          repeat: true,
+          decoration: pw.BoxDecoration(color: _pdfSoft),
+          children: buildCells(headers, header: true),
+        ),
+        for (final List<String> row in rows)
+          pw.TableRow(children: buildCells(row)),
+        if (totalRow != null)
+          pw.TableRow(
+            decoration: pw.BoxDecoration(color: _pdfTotalRow),
+            children: buildCells(totalRow, bold: true),
+          ),
+      ],
+    );
+  }
+
+  pw.Widget _erpTableCell(
+    String text, {
+    required bool header,
+    required bool bold,
+    required double fontSize,
+    required pw.TextAlign align,
+  }) {
+    return pw.Padding(
+      padding: const pw.EdgeInsets.symmetric(horizontal: 3, vertical: 2.6),
+      child: pw.Text(
+        text,
+        textAlign: align,
+        textDirection: pw.TextDirection.rtl,
+        maxLines: header ? 2 : 3,
+        overflow: pw.TextOverflow.clip,
+        style: pw.TextStyle(
+          color: header ? _pdfPrimaryDark : _pdfText,
+          fontSize: header ? fontSize - 0.6 : fontSize,
+          fontWeight: header || bold
+              ? pw.FontWeight.bold
+              : pw.FontWeight.normal,
+        ),
+      ),
+    );
+  }
+
+  /// سطر «إجمالي العبوات = الكراتين × عدد القناني».
+  pw.Widget _packagesTotalBar({
+    required int cartons,
+    required int perCarton,
+    String label = 'إجمالي العبوات',
+  }) {
+    return pw.Container(
+      width: double.infinity,
+      padding: const pw.EdgeInsets.symmetric(horizontal: 5, vertical: 2.5),
+      decoration: pw.BoxDecoration(
+        border: pw.Border.all(color: PdfColors.black, width: 0.6),
+      ),
+      child: pw.Text(
+        '$label: ${AppFormatters.number(cartons * perCarton)} عبوة   =   '
+        '${AppFormatters.number(cartons)} ${AppConstants.cartonUnit} × '
+        '$perCarton عبوة',
+        textAlign: pw.TextAlign.right,
+        textDirection: pw.TextDirection.rtl,
+        style: pw.TextStyle(
+          color: _pdfText,
+          fontSize: 6.8,
+          fontWeight: pw.FontWeight.bold,
+        ),
+      ),
+    );
+  }
+
+  /// جدول الحركة التحليلي A4 بأعمدة الوارد والمنصرف والرصيد التراكمي.
+  pw.Widget _ledgerTable({
+    required List<_LedgerRow> rows,
+    required String unit,
+    required int inboundTotal,
+    required int outboundTotal,
+    required int closingBalance,
+  }) {
+    return _erpTable(
+      headers: <String>[
+        'رقم المستند',
+        'التاريخ',
+        'نوع المستند',
+        'البيان',
+        'الوحدة',
+        'الوارد',
+        'التصريف / المنصرف',
+        'الرصيد',
+      ],
+      rows: <List<String>>[
+        for (final _LedgerRow row in rows)
+          <String>[
+            row.voucherNumber,
+            row.date,
+            row.documentType,
+            row.description,
+            unit,
+            row.inbound == 0 ? '' : AppFormatters.number(row.inbound),
+            row.outbound == 0 ? '' : AppFormatters.number(row.outbound),
+            AppFormatters.number(row.balance),
+          ],
+      ],
+      flexes: <double>[1.5, 1.2, 1.3, 3.6, 0.8, 1.0, 1.3, 1.2],
+      bodyFontSize: 7.2,
+      alignRightIndex: 3,
+      totalRow: <String>[
+        '',
+        '',
+        '',
+        'إجمالي كميات',
+        unit,
+        AppFormatters.number(inboundTotal),
+        AppFormatters.number(outboundTotal),
+        AppFormatters.number(closingBalance),
+      ],
+    );
+  }
+
+  /// سطر التواقيع والاعتماد المؤطر أسفل السند (3 خانات).
+  pw.Widget _voucherSignatureRow({
+    required String storekeeperName,
+    required String receiverLabel,
+    required String? receiverName,
+  }) {
+    return pw.Table(
+      border: pw.TableBorder.all(color: PdfColors.black, width: 0.8),
+      columnWidths: const <int, pw.TableColumnWidth>{
+        0: pw.FlexColumnWidth(1),
+        1: pw.FlexColumnWidth(1),
+        2: pw.FlexColumnWidth(1),
+      },
+      children: <pw.TableRow>[
+        pw.TableRow(
+          children: <pw.Widget>[
+            _signatureCell(
+              approvalSignatureTitle,
+              'الاسم: ......................',
+              'الختم: ..................',
+            ),
+            _signatureCell(
+              receiverLabel,
+              _valueOrFallback(receiverName),
+              'التوقيع: ..............',
+            ),
+            _signatureCell(
+              'المستخدم / أمين المخزن',
+              storekeeperName,
+              'التوقيع: ..............',
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  /// سطرا تواقيع في التقارير (أمين المخزن + الجهة المعنية + الاعتماد).
+  pw.Widget _signaturesLines({
+    required String storekeeperName,
+    required String secondTitle,
+    required String secondName,
+  }) {
+    return pw.Table(
+      border: pw.TableBorder.all(color: PdfColors.black, width: 0.6),
+      columnWidths: const <int, pw.TableColumnWidth>{
+        0: pw.FlexColumnWidth(1),
+        1: pw.FlexColumnWidth(1),
+        2: pw.FlexColumnWidth(1),
+      },
+      children: <pw.TableRow>[
+        pw.TableRow(
+          children: <pw.Widget>[
+            _signatureCell(
+              approvalSignatureTitle,
+              'الاسم: ......................',
+              'الختم: ..................',
+            ),
+            _signatureCell(secondTitle, secondName, 'التوقيع: ..............'),
+            _signatureCell(
+              'المستخدم / أمين المخزن',
+              storekeeperName,
+              'التوقيع: ..............',
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  pw.Widget _signatureCell(String title, String name, String footer) {
+    return pw.Padding(
+      padding: const pw.EdgeInsets.symmetric(horizontal: 4, vertical: 3),
+      child: pw.Column(
+        crossAxisAlignment: pw.CrossAxisAlignment.stretch,
+        children: <pw.Widget>[
+          pw.Text(
+            title,
+            maxLines: 1,
+            overflow: pw.TextOverflow.clip,
+            textAlign: pw.TextAlign.center,
+            textDirection: pw.TextDirection.rtl,
+            style: pw.TextStyle(
+              color: _pdfText,
+              fontSize: 6.4,
+              fontWeight: pw.FontWeight.bold,
+            ),
+          ),
+          pw.SizedBox(height: 1.5),
+          pw.Text(
+            name,
+            maxLines: 1,
+            overflow: pw.TextOverflow.clip,
+            textAlign: pw.TextAlign.center,
+            textDirection: pw.TextDirection.rtl,
+            style: pw.TextStyle(
+              color: _pdfPrimaryDark,
+              fontSize: 7,
+              fontWeight: pw.FontWeight.bold,
+            ),
+          ),
+          pw.SizedBox(height: 7),
+          pw.Text(
+            footer,
+            maxLines: 1,
+            overflow: pw.TextOverflow.clip,
+            textAlign: pw.TextAlign.center,
+            textDirection: pw.TextDirection.rtl,
+            style: pw.TextStyle(color: _pdfMuted, fontSize: 6),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// تذييل الصفحة الرسمي: طبع بواسطة | الصفحة x / y | تاريخ التقرير بالثانية.
+  pw.Widget _pageFooter({
+    required pw.Context context,
+    required String printedBy,
+    required DateTime printedAt,
+  }) {
+    return pw.Container(
+      margin: const pw.EdgeInsets.only(top: 4),
+      padding: const pw.EdgeInsets.only(top: 3),
+      decoration: pw.BoxDecoration(
+        border: pw.Border(
+          top: pw.BorderSide(color: PdfColors.black, width: 0.6),
+        ),
+      ),
+      child: pw.Row(
+        crossAxisAlignment: pw.CrossAxisAlignment.start,
+        children: <pw.Widget>[
+          pw.Expanded(
+            child: pw.Text(
+              'تاريخ التقرير : ${_stamp(printedAt)}',
               maxLines: 1,
+              overflow: pw.TextOverflow.clip,
               textDirection: pw.TextDirection.rtl,
               style: pw.TextStyle(color: _pdfMuted, fontSize: 6.6),
             ),
-          ],
+          ),
+          pw.Text(
+            'الصفحة : ${context.pageNumber} / ${context.pagesCount}',
+            textDirection: pw.TextDirection.rtl,
+            style: pw.TextStyle(color: _pdfMuted, fontSize: 6.6),
+          ),
+          pw.Expanded(
+            child: pw.Text(
+              'طبع بواسطة : ${printedBy.trim().isEmpty ? '' : printedBy.trim()}',
+              maxLines: 1,
+              overflow: pw.TextOverflow.clip,
+              textAlign: pw.TextAlign.right,
+              textDirection: pw.TextDirection.rtl,
+              style: pw.TextStyle(color: _pdfMuted, fontSize: 6.6),
+            ),
+          ),
         ],
       ),
     );
@@ -1328,10 +1695,9 @@ class PdfService {
   pw.Widget _statusBanner({required String title, required String subtitle}) {
     return pw.Container(
       width: double.infinity,
-      padding: const pw.EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+      padding: const pw.EdgeInsets.symmetric(horizontal: 6, vertical: 3),
       decoration: pw.BoxDecoration(
         color: PdfColor.fromHex('#FBECEC'),
-        borderRadius: pw.BorderRadius.circular(5),
         border: pw.Border.all(color: _pdfDanger, width: 0.9),
       ),
       child: pw.Text(
@@ -1340,91 +1706,25 @@ class PdfService {
         textDirection: pw.TextDirection.rtl,
         style: pw.TextStyle(
           color: _pdfDanger,
-          fontSize: 8.6,
+          fontSize: 7.4,
           fontWeight: pw.FontWeight.bold,
         ),
       ),
     );
   }
 
-  pw.Widget _quantityBanner({
-    required String label,
-    required int quantity,
-    required ItemModel item,
-    required PdfColor accent,
-    required PdfColor soft,
-    String? caption,
-  }) {
-    final int absolute = quantity.abs();
-    final String labelText = quantity < 0 ? '$label (عجز)' : label;
-    final int perCarton = _bottlesPerCarton(item);
-
+  pw.Widget _notesBox(String text) {
     return pw.Container(
-      padding: const pw.EdgeInsets.symmetric(horizontal: 9, vertical: 6),
+      width: double.infinity,
+      padding: const pw.EdgeInsets.all(5),
       decoration: pw.BoxDecoration(
-        color: soft,
-        borderRadius: pw.BorderRadius.circular(6),
-        border: pw.Border.all(color: accent, width: 0.8),
+        color: _pdfSoft,
+        border: pw.Border.all(color: _pdfOutline, width: 0.6),
       ),
-      child: pw.Row(
-        crossAxisAlignment: pw.CrossAxisAlignment.center,
-        children: <pw.Widget>[
-          pw.Expanded(
-            child: pw.Column(
-              crossAxisAlignment: pw.CrossAxisAlignment.start,
-              children: <pw.Widget>[
-                pw.Text(
-                  caption == null ? labelText : '$labelText  •  $caption',
-                  textDirection: pw.TextDirection.rtl,
-                  style: pw.TextStyle(
-                    color: _pdfMuted,
-                    fontSize: 7.8,
-                    fontWeight: pw.FontWeight.bold,
-                  ),
-                ),
-                pw.SizedBox(height: 2),
-                pw.Text(
-                  AppFormatters.formatQuantityWithBottles(
-                    absolute,
-                    bottlesPerCarton: perCarton,
-                  ),
-                  textDirection: pw.TextDirection.rtl,
-                  style: pw.TextStyle(
-                    color: accent,
-                    fontSize: 9.5,
-                    fontWeight: pw.FontWeight.bold,
-                  ),
-                ),
-                pw.SizedBox(height: 1),
-                pw.Text(
-                  'سعة الكرتون: $perCarton قنينة × ${_bottleVolume(item)} مل',
-                  textDirection: pw.TextDirection.rtl,
-                  style: pw.TextStyle(color: _pdfMuted, fontSize: 6.6),
-                ),
-              ],
-            ),
-          ),
-          pw.SizedBox(width: 6),
-          pw.Text(
-            AppFormatters.number(absolute),
-            textDirection: pw.TextDirection.rtl,
-            style: pw.TextStyle(
-              color: accent,
-              fontSize: 23,
-              fontWeight: pw.FontWeight.bold,
-            ),
-          ),
-          pw.SizedBox(width: 3),
-          pw.Text(
-            AppConstants.cartonUnit,
-            textDirection: pw.TextDirection.rtl,
-            style: pw.TextStyle(
-              color: accent,
-              fontSize: 9,
-              fontWeight: pw.FontWeight.bold,
-            ),
-          ),
-        ],
+      child: pw.Text(
+        text,
+        textDirection: pw.TextDirection.rtl,
+        style: pw.TextStyle(color: _pdfText, fontSize: 7.6, lineSpacing: 2),
       ),
     );
   }
@@ -1447,601 +1747,63 @@ class PdfService {
     );
   }
 
-  pw.Widget _detailsBox(List<_DetailEntry> entries) {
-    return pw.Container(
-      decoration: pw.BoxDecoration(
-        border: pw.Border.all(color: _pdfOutline, width: 0.6),
-        borderRadius: pw.BorderRadius.circular(5),
-      ),
-      child: pw.Column(
-        children: <pw.Widget>[
-          for (int index = 0; index < entries.length; index++)
-            _detailRow(entries[index], isLast: index == entries.length - 1),
-        ],
-      ),
-    );
-  }
-
-  pw.Widget _detailRow(_DetailEntry entry, {required bool isLast}) {
-    return pw.Container(
-      decoration: pw.BoxDecoration(
-        border: isLast
-            ? null
-            : pw.Border(bottom: pw.BorderSide(color: _pdfOutline, width: 0.5)),
-      ),
-      child: pw.Row(
-        crossAxisAlignment: pw.CrossAxisAlignment.start,
-        children: <pw.Widget>[
-          pw.Container(
-            width: 100,
-            padding: const pw.EdgeInsets.symmetric(
-              horizontal: 7,
-              vertical: 2.5,
-            ),
-            color: _pdfSoft,
-            child: pw.Text(
-              entry.label,
-              textDirection: pw.TextDirection.rtl,
-              style: pw.TextStyle(color: _pdfMuted, fontSize: 7.6),
-            ),
-          ),
-          pw.Expanded(
-            child: pw.Padding(
-              padding: const pw.EdgeInsets.symmetric(
-                horizontal: 7,
-                vertical: 2.5,
-              ),
-              child: pw.Text(
-                entry.value,
-                textDirection: pw.TextDirection.rtl,
-                style: pw.TextStyle(
-                  color: _pdfText,
-                  fontSize: 8,
-                  fontWeight: entry.highlight
-                      ? pw.FontWeight.bold
-                      : pw.FontWeight.normal,
-                ),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  pw.Widget _notesBox(String text) {
-    return pw.Container(
-      width: double.infinity,
-      padding: const pw.EdgeInsets.all(8),
-      decoration: pw.BoxDecoration(
-        color: _pdfSoft,
-        borderRadius: pw.BorderRadius.circular(5),
-        border: pw.Border.all(color: _pdfOutline, width: 0.6),
-      ),
-      child: pw.Text(
-        text,
-        textDirection: pw.TextDirection.rtl,
-        style: pw.TextStyle(color: _pdfText, fontSize: 8.5, lineSpacing: 2),
-      ),
-    );
-  }
-
-  /// قسم التواقيع: أمين المخزن، الطرف الآخر، واعتماد الإدارة — بأسماء مطبوعة.
-  pw.Widget _signaturesSection({
-    required String storekeeperName,
-    required String partyTitle,
-    required String? partyName,
-    String? partyMeta,
-    required String orderReference,
-    required PdfColor accent,
-  }) {
-    return pw.Column(
-      crossAxisAlignment: pw.CrossAxisAlignment.stretch,
-      children: <pw.Widget>[
-        pw.Row(
-          crossAxisAlignment: pw.CrossAxisAlignment.start,
-          children: <pw.Widget>[
-            pw.Expanded(
-              child: _signatureBox(
-                title: storekeeperSignatureTitle(storekeeperName),
-                extra: 'المسؤول عن المخزن والعهدة',
-                accent: accent,
-              ),
-            ),
-            pw.SizedBox(width: 8),
-            pw.Expanded(
-              child: _signatureBox(
-                title: partyTitle,
-                subtitle: _hasText(partyName) ? partyName!.trim() : 'غير محدد',
-                extra: partyMeta,
-                accent: accent,
-              ),
-            ),
-          ],
-        ),
-        pw.SizedBox(height: 6),
-        _approvalBox(orderReference: orderReference, accent: accent),
-      ],
-    );
-  }
-
-  pw.Widget _signatureBox({
-    required String title,
-    String? subtitle,
-    String? extra,
-    required PdfColor accent,
-  }) {
-    return pw.Container(
-      padding: const pw.EdgeInsets.all(5),
-      decoration: pw.BoxDecoration(
-        borderRadius: pw.BorderRadius.circular(4),
-        border: pw.Border.all(color: _pdfOutline, width: 0.7),
-      ),
-      child: pw.Column(
-        crossAxisAlignment: pw.CrossAxisAlignment.stretch,
-        children: <pw.Widget>[
-          pw.Text(
-            title,
-            maxLines: 2,
-            textDirection: pw.TextDirection.rtl,
-            style: pw.TextStyle(
-              color: accent,
-              fontSize: 7.2,
-              fontWeight: pw.FontWeight.bold,
-            ),
-          ),
-          if (subtitle != null) ...<pw.Widget>[
-            pw.SizedBox(height: 1),
-            pw.Text(
-              subtitle,
-              maxLines: 1,
-              textDirection: pw.TextDirection.rtl,
-              style: pw.TextStyle(
-                color: _pdfText,
-                fontSize: 7.2,
-                fontWeight: pw.FontWeight.bold,
-              ),
-            ),
-          ],
-          if (extra != null) ...<pw.Widget>[
-            pw.SizedBox(height: 1),
-            pw.Text(
-              extra,
-              textDirection: pw.TextDirection.rtl,
-              style: pw.TextStyle(color: _pdfMuted, fontSize: 6.6),
-            ),
-          ],
-          pw.SizedBox(height: 8),
-          pw.Text(
-            signatureLine,
-            maxLines: 1,
-            textDirection: pw.TextDirection.rtl,
-            style: pw.TextStyle(color: _pdfMuted, fontSize: 6.6),
-          ),
-        ],
-      ),
-    );
-  }
-
-  pw.Widget _approvalBox({
-    required String orderReference,
-    required PdfColor accent,
-  }) {
-    return pw.Container(
-      padding: const pw.EdgeInsets.symmetric(horizontal: 7, vertical: 4),
-      decoration: pw.BoxDecoration(
-        color: _pdfSoft,
-        borderRadius: pw.BorderRadius.circular(4),
-        border: pw.Border.all(color: _pdfOutline, width: 0.7),
-      ),
-      child: pw.Row(
-        crossAxisAlignment: pw.CrossAxisAlignment.center,
-        children: <pw.Widget>[
-          pw.Expanded(
-            child: pw.Text(
-              'رقم أمر/إذن الصرف: $orderReference',
-              maxLines: 1,
-              textDirection: pw.TextDirection.rtl,
-              style: pw.TextStyle(color: _pdfText, fontSize: 7),
-            ),
-          ),
-          pw.SizedBox(width: 6),
-          pw.Text(
-            approvalSignatureTitle,
-            textDirection: pw.TextDirection.rtl,
-            style: pw.TextStyle(
-              color: accent,
-              fontSize: 7.6,
-              fontWeight: pw.FontWeight.bold,
-            ),
-          ),
-          pw.SizedBox(width: 8),
-          pw.Text(
-            approvalStampLine,
-            textDirection: pw.TextDirection.rtl,
-            style: pw.TextStyle(color: _pdfMuted, fontSize: 6.8),
-          ),
-        ],
-      ),
-    );
-  }
-
-  pw.Widget _footer(pw.Context context) {
-    return pw.Container(
-      alignment: pw.Alignment.center,
-      margin: const pw.EdgeInsets.only(top: 6),
-      child: pw.Text(
-        '${AppConstants.appTitle}  |  الإصدار ${AppConstants.appVersion}  |  '
-        'لا يُعتد بالمستند إلا بعد التوقيع والختم  |  '
-        'صفحة ${context.pageNumber} من ${context.pagesCount}',
-        textAlign: pw.TextAlign.center,
-        textDirection: pw.TextDirection.rtl,
-        style: pw.TextStyle(color: _pdfMuted, fontSize: 6.4),
-      ),
-    );
-  }
-
   // ---------------------------------------------------------------------------
-  // عناصر تقرير المخزون العام
+  // البيانات النصية المساعدة
   // ---------------------------------------------------------------------------
 
-  pw.Widget _summaryMetricsGrid(PeriodSummaryMetrics metrics) {
-    final _MetricInfo inbound = _MetricInfo(
-      label: 'إجمالي الوارد',
-      value: metrics.totalInbound,
-      accent: _pdfPrimary,
-      soft: PdfColor.fromHex('#E7F4FB'),
-    );
-    final _MetricInfo outbound = _MetricInfo(
-      label: 'إجمالي المنصرف',
-      value: metrics.totalOutbound,
-      accent: _pdfPrimaryDark,
-      soft: PdfColor.fromHex('#E9F0FA'),
-    );
-    final _MetricInfo damaged = _MetricInfo(
-      label: 'إجمالي التالف',
-      value: metrics.totalDamaged,
-      accent: _pdfDanger,
-      soft: PdfColor.fromHex('#FBECEC'),
-    );
-    final _MetricInfo net = _MetricInfo(
-      label: metrics.netChange < 0
-          ? 'صافي التغير (انخفاض)'
-          : 'صافي التغير (زيادة)',
-      value: metrics.netChange.abs(),
-      accent: metrics.netChange < 0 ? _pdfDanger : _pdfPrimaryDark,
-      soft: PdfColor.fromHex('#F5F9FC'),
-    );
-
-    return pw.Column(
-      children: <pw.Widget>[
-        pw.Row(
-          children: <pw.Widget>[
-            pw.Expanded(child: _metricTile(inbound)),
-            pw.SizedBox(width: 10),
-            pw.Expanded(child: _metricTile(outbound)),
-          ],
-        ),
-        pw.SizedBox(height: 10),
-        pw.Row(
-          children: <pw.Widget>[
-            pw.Expanded(child: _metricTile(damaged)),
-            pw.SizedBox(width: 10),
-            pw.Expanded(child: _metricTile(net)),
-          ],
-        ),
-      ],
-    );
+  /// سطر المخزن: الاسم والموقع.
+  static String _warehouseLine(WarehouseModel warehouse) {
+    final String location = warehouse.location.trim();
+    return location.isEmpty ? warehouse.name : '${warehouse.name} — $location';
   }
 
-  pw.Widget _metricTile(_MetricInfo metric) {
-    return pw.Container(
-      padding: const pw.EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-      decoration: pw.BoxDecoration(
-        color: metric.soft,
-        borderRadius: pw.BorderRadius.circular(5),
-        border: pw.Border.all(color: metric.accent, width: 0.7),
-      ),
-      child: pw.Column(
-        crossAxisAlignment: pw.CrossAxisAlignment.start,
-        children: <pw.Widget>[
-          pw.Text(
-            metric.label,
-            textDirection: pw.TextDirection.rtl,
-            style: pw.TextStyle(color: _pdfMuted, fontSize: 8.5),
-          ),
-          pw.SizedBox(height: 4),
-          pw.Row(
-            crossAxisAlignment: pw.CrossAxisAlignment.end,
-            children: <pw.Widget>[
-              pw.Text(
-                AppFormatters.number(metric.value),
-                textDirection: pw.TextDirection.rtl,
-                style: pw.TextStyle(
-                  color: metric.accent,
-                  fontSize: 20,
-                  fontWeight: pw.FontWeight.bold,
-                ),
-              ),
-              pw.SizedBox(width: 4),
-              pw.Text(
-                AppConstants.cartonUnit,
-                textDirection: pw.TextDirection.rtl,
-                style: pw.TextStyle(color: metric.accent, fontSize: 8.5),
-              ),
-            ],
-          ),
-        ],
-      ),
-    );
+  /// خانة السبب / الملاحظات.
+  static String _remarks(TransactionModel transaction) {
+    final List<String> parts = <String>[
+      if (_hasText(transaction.reason)) transaction.reason!.trim(),
+      if (_hasText(transaction.notes)) transaction.notes!.trim(),
+    ];
+    return parts.isEmpty ? '—' : parts.join('  |  ');
   }
 
-  pw.Widget _representativesBox({
-    required List<RepresentativeSummary> representatives,
-    required int totalOutbound,
-    required String unit,
-  }) {
-    return pw.Container(
-      decoration: pw.BoxDecoration(
-        border: pw.Border.all(color: _pdfOutline, width: 0.6),
-        borderRadius: pw.BorderRadius.circular(5),
-      ),
-      child: pw.Column(
-        children: <pw.Widget>[
-          pw.Container(
-            padding: const pw.EdgeInsets.symmetric(horizontal: 10, vertical: 7),
-            color: _pdfSoft,
-            child: pw.Text(
-              'الترتيب  •  المندوب  •  الكمية  •  السندات  •  النسبة',
-              textDirection: pw.TextDirection.rtl,
-              style: pw.TextStyle(
-                color: _pdfPrimaryDark,
-                fontSize: 8.5,
-                fontWeight: pw.FontWeight.bold,
-              ),
-            ),
-          ),
-          for (int index = 0; index < representatives.length; index++)
-            pw.Container(
-              padding: const pw.EdgeInsets.symmetric(
-                horizontal: 10,
-                vertical: 7,
-              ),
-              decoration: pw.BoxDecoration(
-                border: pw.Border(
-                  top: pw.BorderSide(color: _pdfOutline, width: 0.5),
-                ),
-              ),
-              child: pw.Row(
-                children: <pw.Widget>[
-                  pw.SizedBox(
-                    width: 24,
-                    child: pw.Text(
-                      '${index + 1}',
-                      textDirection: pw.TextDirection.rtl,
-                      style: pw.TextStyle(
-                        color: _pdfMuted,
-                        fontSize: 9,
-                        fontWeight: pw.FontWeight.bold,
-                      ),
-                    ),
-                  ),
-                  pw.Expanded(
-                    child: pw.Text(
-                      representatives[index].name,
-                      textDirection: pw.TextDirection.rtl,
-                      style: pw.TextStyle(color: _pdfText, fontSize: 9.5),
-                    ),
-                  ),
-                  pw.SizedBox(
-                    width: 74,
-                    child: pw.Text(
-                      '${AppFormatters.number(representatives[index].totalQuantity)} $unit',
-                      textDirection: pw.TextDirection.rtl,
-                      style: pw.TextStyle(
-                        color: _pdfPrimaryDark,
-                        fontSize: 9,
-                        fontWeight: pw.FontWeight.bold,
-                      ),
-                    ),
-                  ),
-                  pw.SizedBox(
-                    width: 46,
-                    child: pw.Text(
-                      '${AppFormatters.number(representatives[index].voucherCount)} سند',
-                      textDirection: pw.TextDirection.rtl,
-                      style: pw.TextStyle(color: _pdfMuted, fontSize: 8.5),
-                    ),
-                  ),
-                  pw.SizedBox(
-                    width: 40,
-                    child: pw.Text(
-                      '${(representatives[index].shareOf(totalOutbound) * 100).round()}%',
-                      textDirection: pw.TextDirection.rtl,
-                      style: pw.TextStyle(color: _pdfMuted, fontSize: 8.5),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-        ],
-      ),
-    );
+  /// بيان الحركة داخل جداول التقارير.
+  static String _movementDescription(TransactionModel transaction) {
+    final List<String> parts = <String>[
+      if (_hasText(transaction.partyName)) transaction.partyName!.trim(),
+      if (_hasText(transaction.orderReference))
+        'أمر: ${transaction.orderReference!.trim()}',
+      if (_hasText(transaction.reason)) transaction.reason!.trim(),
+      if (_hasText(transaction.vehicleNumber))
+        'لوحة: ${transaction.vehicleNumber!.trim()}',
+    ];
+    return parts.isEmpty ? '—' : parts.join(' — ');
   }
 
-  // ---------------------------------------------------------------------------
-  // جداول التقارير الإدارية (A4)
-  // ---------------------------------------------------------------------------
-
-  /// يبني جدولاً مقسّماً إلى كتل صغيرة كي يتنقل بين صفحات A4 دون قصّ.
-  List<pw.Widget> _tableBlocks({
-    required List<String> headers,
-    required List<List<String>> rows,
-    required List<double> widths,
-    required PdfColor accent,
-    int rowsPerBlock = 14,
-  }) {
-    final List<pw.Widget> blocks = <pw.Widget>[];
-    for (int start = 0; start < rows.length; start += rowsPerBlock) {
-      final int end = start + rowsPerBlock > rows.length
-          ? rows.length
-          : start + rowsPerBlock;
-      blocks.add(
-        pw.Container(
-          decoration: pw.BoxDecoration(
-            border: pw.Border.all(color: _pdfOutline, width: 0.6),
-            borderRadius: pw.BorderRadius.circular(4),
-          ),
-          child: pw.Column(
-            children: <pw.Widget>[
-              _tableHeaderRow(headers: headers, widths: widths, accent: accent),
-              for (int index = start; index < end; index++)
-                _tableDataRow(
-                  cells: rows[index],
-                  widths: widths,
-                  striped: (index - start).isOdd,
-                ),
-            ],
-          ),
-        ),
-      );
-      blocks.add(pw.SizedBox(height: 5));
+  /// أثر الحركة على الرصيد: موجب للوارد وسالب للمنصرف والتالف.
+  static int _signedQuantity(TransactionModel transaction) {
+    switch (transaction.transactionType) {
+      case TransactionTypes.inbound:
+        return transaction.quantity.abs();
+      case TransactionTypes.outbound:
+      case TransactionTypes.marketReplacement:
+      case TransactionTypes.damage:
+        return -transaction.quantity.abs();
+      default:
+        return transaction.quantity;
     }
-    return blocks;
   }
 
-  pw.Widget _tableHeaderRow({
-    required List<String> headers,
-    required List<double> widths,
-    required PdfColor accent,
-  }) {
-    return pw.Container(
-      padding: const pw.EdgeInsets.symmetric(horizontal: 5, vertical: 5),
-      decoration: pw.BoxDecoration(
-        color: _pdfSoft,
-        border: pw.Border(
-          bottom: pw.BorderSide(color: _pdfOutline, width: 0.6),
-        ),
-      ),
-      child: pw.Row(
-        children: <pw.Widget>[
-          for (int index = 0; index < headers.length; index++)
-            pw.SizedBox(
-              width: widths[index],
-              child: pw.Text(
-                headers[index],
-                textAlign: pw.TextAlign.center,
-                textDirection: pw.TextDirection.rtl,
-                style: pw.TextStyle(
-                  color: accent,
-                  fontSize: 7.4,
-                  fontWeight: pw.FontWeight.bold,
-                ),
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-
-  pw.Widget _tableDataRow({
-    required List<String> cells,
-    required List<double> widths,
-    required bool striped,
-  }) {
-    return pw.Container(
-      padding: const pw.EdgeInsets.symmetric(horizontal: 5, vertical: 3.4),
-      decoration: pw.BoxDecoration(
-        color: striped ? PdfColor.fromHex('#FAFCFE') : null,
-        border: pw.Border(
-          bottom: pw.BorderSide(color: _pdfOutline, width: 0.4),
-        ),
-      ),
-      child: pw.Row(
-        children: <pw.Widget>[
-          for (int index = 0; index < cells.length; index++)
-            pw.SizedBox(
-              width: widths[index],
-              child: pw.Text(
-                cells[index],
-                maxLines: 1,
-                overflow: pw.TextOverflow.clip,
-                textAlign: index < 2 ? pw.TextAlign.right : pw.TextAlign.center,
-                textDirection: pw.TextDirection.rtl,
-                style: pw.TextStyle(color: _pdfText, fontSize: 7.2),
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-
-  /// بطاقة رقم إجمالي في التقارير الإدارية.
-  pw.Widget _totalTile({
-    required String label,
-    required String value,
-    required String unit,
-    required PdfColor accent,
-    required PdfColor soft,
-  }) {
-    return pw.Container(
-      padding: const pw.EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-      decoration: pw.BoxDecoration(
-        color: soft,
-        borderRadius: pw.BorderRadius.circular(5),
-        border: pw.Border.all(color: accent, width: 0.7),
-      ),
-      child: pw.Column(
-        crossAxisAlignment: pw.CrossAxisAlignment.start,
-        children: <pw.Widget>[
-          pw.Text(
-            label,
-            maxLines: 1,
-            textDirection: pw.TextDirection.rtl,
-            style: pw.TextStyle(color: _pdfMuted, fontSize: 8),
-          ),
-          pw.SizedBox(height: 4),
-          pw.Row(
-            crossAxisAlignment: pw.CrossAxisAlignment.end,
-            children: <pw.Widget>[
-              pw.Text(
-                value,
-                textDirection: pw.TextDirection.rtl,
-                style: pw.TextStyle(
-                  color: accent,
-                  fontSize: 16,
-                  fontWeight: pw.FontWeight.bold,
-                ),
-              ),
-              pw.SizedBox(width: 3),
-              pw.Text(
-                unit,
-                textDirection: pw.TextDirection.rtl,
-                style: pw.TextStyle(color: accent, fontSize: 8),
-              ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-
-  /// تاريخ ووقت مختصر لجدول السندات: `13/11 09:30`.
-  static String _shortDateTime(DateTime value) =>
-      '${_pad(value.day)}/${_pad(value.month)} '
-      '${_pad(value.hour)}:${_pad(value.minute)}';
-
-  /// الاسم المختصر لنوع الحركة داخل جداول التقارير.
+  /// الاسم المختصر لنوع المستند داخل جداول التقارير.
   static String _typeLabel(String transactionType) {
     switch (transactionType) {
       case TransactionTypes.inbound:
-        return 'استلام';
+        return 'تحويل وارد';
       case TransactionTypes.outbound:
-        return 'صرف عادي';
+        return 'أمر صرف';
       case TransactionTypes.marketReplacement:
         return 'بدل تالف';
       case TransactionTypes.damage:
-        return 'إتلاف';
+        return 'إتلاف مخزني';
       case TransactionTypes.adjustment:
         return 'تسوية جرد';
       default:
@@ -2049,7 +1811,7 @@ class PdfService {
     }
   }
 
-  /// سطر بيانات المندوب المطبوع في بطاقة التعريف.
+  /// سطر بيانات المندوب المطبوع في شريط التعريف.
   static String _contactLine({String? phone, String? vehicle}) {
     final List<String> parts = <String>[
       if (_hasText(phone)) 'هاتف: ${phone!.trim()}',
@@ -2058,130 +1820,7 @@ class PdfService {
     return parts.isEmpty ? 'بيانات الدليل غير مسجلة' : parts.join('  |  ');
   }
 
-  // ---------------------------------------------------------------------------
-  // البيانات النصية
-  // ---------------------------------------------------------------------------
-
-  List<_DetailEntry> _detailRows(TransactionModel transaction, ItemModel item) {
-    final List<_DetailEntry> rows = _baseDetailRows(transaction, item);
-    if (_hasText(transaction.notes)) {
-      rows.add(_DetailEntry('ملاحظات', transaction.notes!.trim()));
-    }
-    return rows;
-  }
-
-  List<_DetailEntry> _baseDetailRows(
-    TransactionModel transaction,
-    ItemModel item,
-  ) {
-    final String specifications = _specifications(item);
-    final String quantity = _quantityWithUnits(transaction.quantity, item);
-    final String status = _statusValue(transaction);
-
-    switch (transaction.transactionType) {
-      case TransactionTypes.inbound:
-        return <_DetailEntry>[
-          _DetailEntry('الصنف', item.name),
-          _DetailEntry('المواصفات', specifications),
-          _DetailEntry('الكمية المستلمة', quantity, highlight: true),
-          _DetailEntry('مسلّم المصنع', _valueOrFallback(transaction.partyName)),
-          if (_hasText(transaction.orderReference))
-            _DetailEntry('رقم الإذن', transaction.orderReference!.trim()),
-          if (transaction.isRejected) _DetailEntry('حالة السند', status),
-        ];
-      case TransactionTypes.outbound:
-        return <_DetailEntry>[
-          _DetailEntry(
-            'رقم أمر الصرف',
-            _valueOrFallback(transaction.orderReference),
-          ),
-          _DetailEntry('الصنف', item.name),
-          _DetailEntry('المواصفات', specifications),
-          _DetailEntry('الكمية المصروفة', quantity, highlight: true),
-          _DetailEntry(
-            'اسم المندوب / المستلم',
-            _valueOrFallback(transaction.partyName),
-          ),
-          if (_hasText(transaction.vehicleNumber))
-            _DetailEntry('رقم لوحة السيارة', transaction.vehicleNumber!.trim()),
-          if (transaction.isRejected) _DetailEntry('حالة السند', status),
-        ];
-      case TransactionTypes.damage:
-        return <_DetailEntry>[
-          _DetailEntry('الصنف', item.name),
-          _DetailEntry('المواصفات', specifications),
-          _DetailEntry('الكمية التالفة', quantity, highlight: true),
-          _DetailEntry('سبب الإتلاف', _valueOrFallback(transaction.reason)),
-          _DetailEntry(
-            'المسؤول عن الإتلاف',
-            _valueOrFallback(transaction.partyName),
-          ),
-          if (transaction.isRejected) _DetailEntry('حالة السند', status),
-        ];
-      case TransactionTypes.marketReplacement:
-        return <_DetailEntry>[
-          _DetailEntry(
-            'رقم أمر الصرف',
-            _valueOrFallback(transaction.orderReference),
-          ),
-          _DetailEntry('الصنف', item.name),
-          _DetailEntry('المواصفات', specifications),
-          _DetailEntry('الكمية المصروفة كبدل تالف', quantity, highlight: true),
-          _DetailEntry(
-            'اسم المندوب / المستلم',
-            _valueOrFallback(transaction.partyName),
-          ),
-          if (_hasText(transaction.vehicleNumber))
-            _DetailEntry('رقم لوحة السيارة', transaction.vehicleNumber!.trim()),
-          _DetailEntry('سبب الاستبدال', _valueOrFallback(transaction.reason)),
-          if (transaction.isRejected) _DetailEntry('حالة السند', status),
-        ];
-      case TransactionTypes.adjustment:
-        return <_DetailEntry>[
-          _DetailEntry('الصنف', item.name),
-          _DetailEntry('المواصفات', specifications),
-          _DetailEntry('الكمية المسوّاة', quantity, highlight: true),
-          _DetailEntry(
-            'نوع التسوية',
-            transaction.quantity < 0 ? 'عجز (نقص)' : 'زيادة (فائض)',
-          ),
-          _DetailEntry('سبب التسوية', _valueOrFallback(transaction.reason)),
-          _DetailEntry('المسؤول', _valueOrFallback(transaction.partyName)),
-          if (transaction.isRejected) _DetailEntry('حالة السند', status),
-        ];
-      default:
-        return <_DetailEntry>[
-          _DetailEntry('الصنف', item.name),
-          _DetailEntry('المواصفات', specifications),
-          _DetailEntry('الكمية', quantity, highlight: true),
-          _DetailEntry('الطرف الآخر', _valueOrFallback(transaction.partyName)),
-          if (_hasText(transaction.reason))
-            _DetailEntry('السبب', transaction.reason!.trim()),
-          if (transaction.isRejected) _DetailEntry('حالة السند', status),
-        ];
-    }
-  }
-
-  static String _statusValue(TransactionModel transaction) {
-    if (transaction.isRejected) {
-      final String reason = (transaction.rejectionReason ?? '').trim();
-      return reason.isEmpty
-          ? TransactionStatus.label(transaction.status)
-          : '${TransactionStatus.label(transaction.status)} — $reason';
-    }
-    return TransactionStatus.label(transaction.status);
-  }
-
-  /// اسم الطرف الآخر كما سيُطبع في خانة التوقيع.
-  static String? _partyMeta(TransactionModel transaction) {
-    if (_hasText(transaction.vehicleNumber)) {
-      return 'رقم اللوحة: ${transaction.vehicleNumber!.trim()}';
-    }
-    if (_hasText(transaction.orderReference)) {
-      return 'أمر الصرف: ${transaction.orderReference!.trim()}';
-    }
-    return null;
-  }
+  static String _itemCode(ItemModel item) => _pad(item.id ?? 1, width: 6);
 
   static String _orderReference(TransactionModel transaction) {
     if (_hasText(transaction.orderReference)) {
@@ -2189,6 +1828,11 @@ class PdfService {
     }
     return transaction.voucherNumber;
   }
+
+  /// الختم الزمني الكامل بالثانية للسطر السفلي.
+  static String _stamp(DateTime value) =>
+      '${_pad(value.year, width: 4)}/${_pad(value.month)}/${_pad(value.day)} '
+      '${_pad(value.hour)}:${_pad(value.minute)}:${_pad(value.second)}';
 
   static int _bottlesPerCarton(ItemModel item) {
     return item.bottleCount > 0
@@ -2205,19 +1849,11 @@ class PdfService {
   static String _specifications(ItemModel item) =>
       '${_bottlesPerCarton(item)} قنينة × ${_bottleVolume(item)} مل';
 
-  /// الكمية بالوحدتين: `150 كرتون (3,000 عبوة)`.
-  static String _quantityWithUnits(int quantity, ItemModel item) {
-    return AppFormatters.formatQuantityWithBottles(
-      quantity.abs(),
-      bottlesPerCarton: _bottlesPerCarton(item),
-    );
-  }
-
   static bool _hasText(String? value) =>
       value != null && value.trim().isNotEmpty;
 
   static String _valueOrFallback(String? value) =>
-      _hasText(value) ? value!.trim() : 'غير محدد';
+      _hasText(value) ? value!.trim() : '—';
 
   static String _pad(int value, {int width = 2}) =>
       value.toString().padLeft(width, '0');
@@ -2226,57 +1862,51 @@ class PdfService {
     switch (transactionType) {
       case TransactionTypes.inbound:
         return _VoucherTypeInfo(
-          title: 'سند استلام بضاعة',
-          documentTitle: 'سند توريد واستلام كراتين',
-          quantityLabel: 'الكمية المستلمة من المصنع',
-          partyTitle: 'مسلّم المصنع / السائق',
+          title: 'سند استلام وتوريد كراتين',
+          documentTitle: 'سند استلام وتوريد مخزني',
+          movementLabel: 'استلام مصنع',
+          receiverLabel: 'مسلّم المصنع / السائق',
           accent: _pdfPrimary,
-          accentSoft: PdfColor.fromHex('#E7F4FB'),
         );
       case TransactionTypes.outbound:
         return _VoucherTypeInfo(
-          title: 'سند صرف لمندوب',
-          documentTitle: 'سند صرف كراتين لمندوب',
-          quantityLabel: 'الكمية المصروفة للمندوب',
-          partyTitle: 'المندوب المستلم',
+          title: 'سند صرف كراتين لمندوب',
+          documentTitle: 'سند صرف مخزني',
+          movementLabel: 'صرف لمندوب',
+          receiverLabel: 'المستلم / المندوب / السائق',
           accent: _pdfPrimaryDark,
-          accentSoft: PdfColor.fromHex('#E9F0FA'),
         );
       case TransactionTypes.damage:
         return _VoucherTypeInfo(
-          title: 'محضر إتلاف مخزني',
-          documentTitle: 'محضر إتلاف كراتين مخزنية',
-          quantityLabel: 'الكمية التالفة / الهالكة',
-          partyTitle: 'المسؤول عن الإتلاف',
+          title: 'محضر إتلاف كراتين مخزنية',
+          documentTitle: 'محضر إتلاف مخزني',
+          movementLabel: 'إتلاف مخزني',
+          receiverLabel: 'المسؤول عن الإتلاف',
           accent: _pdfDanger,
-          accentSoft: PdfColor.fromHex('#FBECEC'),
         );
       case TransactionTypes.marketReplacement:
         return _VoucherTypeInfo(
-          title: 'سند صرف بدل تالف',
-          documentTitle: 'سند صرف كراتين بدل تالف',
-          quantityLabel: 'الكمية المصروفة كبدل تالف',
-          partyTitle: 'المندوب المستلم',
+          title: 'سند صرف كراتين بدل تالف',
+          documentTitle: 'سند صرف بدل تالف',
+          movementLabel: 'بدل تالف',
+          receiverLabel: 'المستلم / المندوب / السائق',
           accent: _pdfWarning,
-          accentSoft: PdfColor.fromHex('#FFF6E3'),
         );
       case TransactionTypes.adjustment:
         return _VoucherTypeInfo(
-          title: 'سند تسوية جرد',
-          documentTitle: 'سند تسوية جرد مخزني',
-          quantityLabel: 'الكمية المسوّاة',
-          partyTitle: 'لجنة الجرد',
+          title: 'سند تسوية جرد مخزني',
+          documentTitle: 'سند تسوية جرد',
+          movementLabel: 'تسوية جرد',
+          receiverLabel: 'لجنة الجرد',
           accent: _pdfWarning,
-          accentSoft: PdfColor.fromHex('#FFF6E3'),
         );
       default:
         return _VoucherTypeInfo(
-          title: 'سند مخزني',
-          documentTitle: 'سند مخزني رسمي',
-          quantityLabel: 'الكمية',
-          partyTitle: 'الطرف الآخر',
+          title: 'سند مخزني رسمي',
+          documentTitle: 'سند مخزني',
+          movementLabel: transactionType,
+          receiverLabel: 'الطرف الآخر',
           accent: _pdfPrimary,
-          accentSoft: PdfColor.fromHex('#E7F4FB'),
         );
     }
   }
@@ -2284,49 +1914,56 @@ class PdfService {
 
 /// ألوان ونصوص خاصة بنوع السند.
 class _VoucherTypeInfo {
-  _VoucherTypeInfo({
+  const _VoucherTypeInfo({
     required this.title,
     required this.documentTitle,
-    required this.quantityLabel,
-    required this.partyTitle,
+    required this.movementLabel,
+    required this.receiverLabel,
     required this.accent,
-    required this.accentSoft,
   });
 
+  /// العنوان المطبوع في منتصف السند.
   final String title;
 
-  /// العنوان المطبوع تحت شعار الترويسة (مثل: «سند صرف كراتين لمندوب»).
+  /// العنوان المطبوع تحت شعار الترويسة.
   final String documentTitle;
-  final String quantityLabel;
 
-  /// صفة الطرف الآخر في خانة التوقيع.
-  final String partyTitle;
+  /// قيمة خانة «نوع الحركة».
+  final String movementLabel;
+
+  /// صفة الطرف المستلم في سطر التواقيع.
+  final String receiverLabel;
   final PdfColor accent;
-  final PdfColor accentSoft;
 }
 
-/// بطاقة مقياس رقمية في تقرير المخزون العام.
-class _MetricInfo {
-  const _MetricInfo({
-    required this.label,
-    required this.value,
-    required this.accent,
-    required this.soft,
-  });
-
-  final String label;
-  final int value;
-  final PdfColor accent;
-  final PdfColor soft;
-}
-
-/// صف واحد في جدول بيانات السند.
-class _DetailEntry {
-  const _DetailEntry(this.label, this.value, {this.highlight = false});
+/// خانة (تسمية + قيمة) في شبكة بيانات السند وأشرطة التعريف.
+class _ErpField {
+  const _ErpField(this.label, this.value, {this.flex = 1});
 
   final String label;
   final String value;
-  final bool highlight;
+  final double flex;
+}
+
+/// صف واحد في جدول الحركة التحليلي (A4).
+class _LedgerRow {
+  const _LedgerRow({
+    required this.voucherNumber,
+    required this.date,
+    required this.documentType,
+    required this.description,
+    required this.balance,
+    this.inbound = 0,
+    this.outbound = 0,
+  });
+
+  final String voucherNumber;
+  final String date;
+  final String documentType;
+  final String description;
+  final int inbound;
+  final int outbound;
+  final int balance;
 }
 
 /// خطّا المستند (عادي وعريض).
